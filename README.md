@@ -1,21 +1,18 @@
 # BVR-Player-Web
 
 A web-based player for Blue Iris `.bvr` files. Everything runs locally in the
-browser — the file is decoded with [WebCodecs](https://developer.mozilla.org/docs/Web/API/WebCodecs_API)
-and never uploaded anywhere.
+browser — the file is never uploaded anywhere.
 
 ## Using it
 
+https://bp2008.github.io/BVR-Player-Web/
+
 Open the player, then drag a `.bvr` file onto the page or press **Open**.
 
-Two deployment shapes are supported from the same build:
+### Requirements
 
-- **Served** (GitHub Pages or any static host) — point Pages at the `docs/`
-  folder on `main`. This gets the full PWA: installable, offline app shell, and
-  an OS file handler for `.bvr` once installed.
-- **Off the filesystem** — double-click `docs/index.html`. Everything is inlined
-  into that one file, so it works over `file://` with no server. The service
-  worker and install prompt are simply absent there.
+A Chromium-based browser (Chrome, Edge, Opera) for WebCodecs. H.265/HEVC clips
+additionally need platform HEVC decode support (should work on most modern devices).
 
 ### Controls
 
@@ -33,13 +30,22 @@ The skip interval (default 10 s), time display (elapsed or wall clock), loop, an
 — for dual-stream recordings — the main/sub stream selection live in the settings
 menu and persist in `localStorage`.
 
-### Requirements
 
-A Chromium-based browser (Chrome, Edge, Opera) for WebCodecs. H.265/HEVC clips
-additionally need platform HEVC decode support. MPEG-4 Part 2 recordings cannot
-be played: no browser exposes a decoder for it.
+## Technical Details for Developers
 
-## Development
+Video is decoded with [WebCodecs](https://developer.mozilla.org/docs/Web/API/WebCodecs_API).
+
+Two deployment shapes are supported from the same build:
+
+- **Served** (GitHub Pages or any static host) — point Pages at the `docs/`
+  folder on `main`. This gets the full PWA: installable, offline app shell, and
+  an OS file handler for `.bvr` once installed.
+- **Off the filesystem** — double-click `docs/index.html`. Everything is inlined
+  into that one file, so it works over `file://` with no server. The service
+  worker and install prompt are simply absent there.
+
+
+### Development
 
 ```bash
 npm install
@@ -52,7 +58,7 @@ what GitHub Pages serves and what you double-click.
 
 Put `.bvr` files in `sample/` for local testing; that folder is git-ignored.
 
-## How it works
+### How it works
 
 ```
 src/bvr/       format layer  - frame headers, file header, full-file index, codec ids
@@ -84,5 +90,6 @@ src/components/  Vue 3 UI (Options API)
   files stamp every packet 0). PCM and G.711 µ-law are decoded directly; FLAC
   goes through `AudioDecoder`.
 
-The container format is documented in [BVR_File_Format_Spec.md](BVR_File_Format_Spec.md).
-Roadmap notes live in [PLANNED_FEATURES.md](PLANNED_FEATURES.md).
+The container format details were provided by the Blue Iris developer and is avialable here: [BVR_File_Format_Spec.md](BVR_File_Format_Spec.md).
+
+Roadmap notes for this app live in [PLANNED_FEATURES.md](PLANNED_FEATURES.md).
