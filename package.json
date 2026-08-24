@@ -1,0 +1,21 @@
+{
+  "name": "bvr-player-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A web-based player for Blue Iris BVR files.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/gen-icons.mjs && vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "vue": "^3.5.24"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "vite": "^7.1.14",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}
