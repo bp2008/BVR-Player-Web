@@ -78,14 +78,20 @@
       <div class="controls__spacer"></div>
 
       <span v-if="state.buffering" class="chip chip--busy">buffering</span>
-      <span v-if="showStreamChip" class="chip">{{ shortStream }}</span>
+
+      <StreamMenu
+        v-if="showStreamChip"
+        :state="state"
+        @stream="(m) => $emit('stream', m)"
+        @open-change="(o) => setMenuOpen('stream', o)"
+      />
 
       <SettingsMenu
         :settings="settings"
         :state="state"
         @patch="(p) => $emit('patch', p)"
         @stream="(m) => $emit('stream', m)"
-        @open-change="(o) => $emit('menu-open', o)"
+        @open-change="(o) => setMenuOpen('settings', o)"
       />
 
       <button
@@ -106,11 +112,12 @@ import AppIcon from './AppIcon.vue'
 import SeekBar from './SeekBar.vue'
 import VolumeControl from './VolumeControl.vue'
 import SettingsMenu from './SettingsMenu.vue'
+import StreamMenu from './StreamMenu.vue'
 import { formatTime, formatUtc } from '../util/format.js'
 
 export default {
   name: 'ControlBar',
-  components: { AppIcon, SeekBar, VolumeControl, SettingsMenu },
+  components: { AppIcon, SeekBar, VolumeControl, SettingsMenu, StreamMenu },
   props: {
     state: { type: Object, required: true },
     settings: { type: Object, required: true },
@@ -120,6 +127,9 @@ export default {
     'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume',
     'toggle-mute', 'toggle-fullscreen', 'patch', 'stream', 'menu-open'
   ],
+  data () {
+    return { openMenus: { settings: false, stream: false } }
+  },
   computed: {
     skipSeconds () { return this.settings.skipSeconds },
     skipLabel () {
@@ -141,11 +151,13 @@ export default {
     },
     showStreamChip () {
       return this.state.hasMainStream && this.state.hasSubStream
-    },
-    shortStream () {
-      if (this.state.streamMode === 'sub') return `sub ${this.state.width}x${this.state.height}`
-      if (this.state.streamMode === 'main') return `main ${this.state.width}x${this.state.height}`
-      return `auto ${this.state.width}x${this.state.height}`
+    }
+  },
+  methods: {
+    /** The chrome must stay up while *any* of the popups is open. */
+    setMenuOpen (which, open) {
+      this.openMenus[which] = open
+      this.$emit('menu-open', this.openMenus.settings || this.openMenus.stream)
     }
   }
 }
@@ -207,17 +219,6 @@ export default {
   color: var(--text-dim);
 }
 
-.chip {
-  padding: 3px 8px;
-  margin-right: 4px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
 .chip--busy {
   border-color: rgba(88, 166, 255, 0.5);
   color: var(--accent);
@@ -229,7 +230,6 @@ export default {
 
 @media (max-width: 620px) {
   .controls { padding: 36px 8px 8px; }
-  .chip { display: none; }
   .readout { margin-left: 4px; font-size: 12px; }
 }
 </style>

@@ -7,10 +7,11 @@
     @dragover.prevent="onDragOver"
     @dragleave.prevent="onDragLeave"
     @drop.prevent="onDrop"
-    @pointermove="wakeUi"
-    @pointerdown="wakeUi"
+    @pointermove="onPointerMove"
+    @pointerdown="onPointerDown"
+    @pointerleave="onPointerLeave"
   >
-    <div class="stage" ref="stage" @click="onStageClick" @dblclick="toggleFullscreen">
+    <div class="stage" ref="stage" @click="onStageClick" @dblclick="onStageDblClick">
       <canvas ref="canvas" class="stage__canvas"></canvas>
 
       <div v-if="!hasFile" class="dropzone">
@@ -127,7 +128,13 @@ import { BvrPlayer } from './player/BvrPlayer.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { formatBytes } from './util/format.js'
 
+// How long the chrome lingers after the last pointer activity. Touch gets a
+// longer grace period because there is no hover to bring it back - only a tap.
 const UI_IDLE_MS = 2600
+const UI_IDLE_TOUCH_MS = 4200
+
+// A pointer resting anywhere inside these keeps the chrome up indefinitely.
+const CHROME_SELECTOR = '.topbar, .controlbar'
 
 export default {
   name: 'App',
@@ -159,6 +166,10 @@ export default {
         hasSubStream: false,
         hasMainStream: false,
         switchingMode: false,
+        mainWidth: 0,
+        mainHeight: 0,
+        subWidth: 0,
+        subHeight: 0,
         startUtc: 0,
         currentUtc: 0,
         truncated: false,
@@ -170,6 +181,8 @@ export default {
       isFullscreen: false,
       uiVisible: true,
       menuOpen: false,
+      scrubbing: false,
+      pointerOverChrome: false,
       installPrompt: null,
       webCodecsOk: typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined'
     }
@@ -186,10 +199,21 @@ export default {
         this.player.play()
       }
     },
-    'state.playing' (playing) {
-      if (playing) this.scheduleHide()
-      else this.wakeUi()
+    'state.playing' () {
+      // Pausing no longer pins the chrome open; it re-arms the same idle timer.
+      this.wakeUi()
+    },
+    'state.status' () {
+      this.wakeUi()
     }
+  },
+  created () {
+    // Deliberately not reactive: these only ever feed decisions taken inside
+    // event handlers, and nothing renders from them.
+    this.hideTimer = null
+    this.lastPointerWasTouch = false
+    this.uiVisibleBeforePointer = true
+    this.keyboardNav = false
   },
   mounted () {
     this.player = new BvrPlayer({
@@ -216,7 +240,7 @@ export default {
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
     window.removeEventListener('beforeinstallprompt', this.onInstallPrompt)
     if (this.ro) this.ro.disconnect()
-    if (this.hideTimer) clearTimeout(this.hideTimer)
+    this.clearHideTimer()
     if (this.player) this.player.destroy()
   },
   methods: {
@@ -269,7 +293,11 @@ export default {
     onSkip (seconds) { this.player.skip(seconds) },
     onStep (delta) { this.player.stepFrames(delta) },
     onSeek (ms, preview) { this.player.seek(ms, { preview: !!preview }) },
-    onScrubbing (on) { this.player.setScrubbing(on) },
+    onScrubbing (on) {
+      this.scrubbing = on
+      this.player.setScrubbing(on)
+      this.wakeUi()
+    },
     onVolume (v) {
       this.player.setVolume(v)
       this.patchSettings({ volume: v, muted: this.player.muted })
@@ -284,7 +312,21 @@ export default {
     },
     onStageClick (event) {
       if (event.target !== this.$refs.canvas) return
-      if (this.hasFile && this.state.status === 'ready') this.togglePlay()
+      if (!this.hasFile || this.state.status !== 'ready') return
+      // Touch has no hover, so a tap on a bare video surface is the only way to
+      // bring the chrome back - it must not also toggle playback.
+      if (this.lastPointerWasTouch && !this.uiVisibleBeforePointer) {
+        this.wakeUi()
+        return
+      }
+      this.togglePlay()
+    },
+    onStageDblClick (event) {
+      // Only the video surface toggles fullscreen. Without this check, any fast
+      // double click inside the stage - frame-step button, number spinner, chip
+      // - bubbles up here and flips fullscreen underneath the user's cursor.
+      if (event.target !== this.$refs.canvas) return
+      this.toggleFullscreen()
     },
 
     // -------------------------------------------------------------- settings
@@ -309,20 +351,68 @@ export default {
     },
     onFullscreenChange () {
       this.isFullscreen = !!document.fullscreenElement
+      this.wakeUi()
       this.$nextTick(() => this.player.onResize())
     },
 
     // ------------------------------------------------------------- chrome/UI
-    wakeUi () {
+    onPointerMove (event) { this.wakeUi(event) },
+    onPointerDown (event) {
+      this.lastPointerWasTouch = event.pointerType === 'touch'
+      this.uiVisibleBeforePointer = this.uiVisible
+      this.keyboardNav = false
+      this.wakeUi(event)
+    },
+    onPointerLeave (event) {
+      // The pointer left the window: nothing can be near the controls any more,
+      // so drop the chrome at once rather than waiting out the idle timer.
+      if (event.pointerType === 'touch') return
+      this.pointerOverChrome = false
+      if (!this.canHideUi()) return
+      this.clearHideTimer()
+      this.uiVisible = false
+    },
+    wakeUi (event) {
+      // Hovering the bars themselves pins them open - a motionless pointer over
+      // the controls still counts as "near" them.
+      if (event && event.target && event.target.closest) {
+        this.pointerOverChrome = !!event.target.closest(CHROME_SELECTOR)
+      }
       this.uiVisible = true
       this.scheduleHide()
     },
-    scheduleHide () {
+    canHideUi () {
+      if (!this.hasFile || this.state.status !== 'ready') return false
+      if (this.menuOpen || this.scrubbing || this.pointerOverChrome) return false
+      return !this.chromeHasKeyboardFocus()
+    },
+    /**
+     * Hiding a control that someone tabbed to would strand them, so keyboard
+     * focus inside the chrome pins it open.
+     *
+     * Plain :focus is the wrong test - a click leaves the button focused, which
+     * would pin the chrome open after every click - and :focus-visible is a
+     * browser heuristic rather than a promise. Tracking the last input device
+     * ourselves is the only version that behaves the same everywhere.
+     */
+    chromeHasKeyboardFocus () {
+      if (!this.keyboardNav) return false
+      const el = document.activeElement
+      if (!el || el === document.body || !el.closest) return false
+      return !!el.closest(CHROME_SELECTOR)
+    },
+    clearHideTimer () {
       if (this.hideTimer) clearTimeout(this.hideTimer)
-      if (!this.state.playing || this.menuOpen || !this.hasFile) return
+      this.hideTimer = null
+    },
+    scheduleHide () {
+      this.clearHideTimer()
+      if (!this.canHideUi()) return
+      const delay = this.lastPointerWasTouch ? UI_IDLE_TOUCH_MS : UI_IDLE_MS
       this.hideTimer = setTimeout(() => {
-        if (this.state.playing && !this.menuOpen) this.uiVisible = false
-      }, UI_IDLE_MS)
+        this.hideTimer = null
+        if (this.canHideUi()) this.uiVisible = false
+      }, delay)
     },
     onMenuOpen (open) {
       this.menuOpen = open
@@ -340,8 +430,16 @@ export default {
 
     // -------------------------------------------------------------- keyboard
     onKeyDown (event) {
+      // Any key counts as keyboard navigation, Tab included - that is the one
+      // that parks focus on a control the chrome must then keep on screen.
+      this.keyboardNav = true
+
       const el = event.target
       if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      // A clicked button keeps focus, and the browser activates it on Space or
+      // Enter. Handling those here too would fire the action twice - which reads
+      // as the control doing nothing at all.
+      if (el && el.tagName === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) return
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
       const skip = this.settings.skipSeconds

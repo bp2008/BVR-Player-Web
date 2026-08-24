@@ -5,11 +5,39 @@
   --text-dim: #9aa4b2;
   --accent: #58a6ff;
   --danger: #ff7b72;
+  /* Opaque, because a translucent field background is what a <select> hands to
+     the browser for its native popup - and blended over white that reads as a
+     light-theme control no matter what `color-scheme` says. */
+  --field: #1b2029;
+  --field-border: rgba(255, 255, 255, 0.16);
+  color-scheme: dark;
+}
+
+html {
   color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Native widgets: keep every one of them on the dark side of the fork,
+   including the popups the browser renders outside the page. */
+input,
+select,
+textarea,
+button {
+  color-scheme: dark;
+}
+
+select option,
+select optgroup {
+  background-color: var(--field);
+  color: var(--text);
+}
+
+select option:disabled {
+  color: var(--text-dim);
 }
 
 html,
@@ -87,6 +115,8 @@ body {
 
 .topbar__left {
   display: flex;
+  -webkit-user-select: none;
+  user-select: none;
   align-items: center;
   gap: 9px;
   min-width: 0;
@@ -137,6 +167,12 @@ body {
   pointer-events: none;
 }
 
+.app--hide-ui .bigplay {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.96);
+  pointer-events: none;
+}
+
 .app--hide-ui .stage {
   cursor: none;
 }
@@ -149,6 +185,8 @@ body {
 
 .ctl-btn {
   display: inline-flex;
+  -webkit-user-select: none;
+  user-select: none;
   align-items: center;
   justify-content: center;
   width: 38px;
@@ -193,6 +231,8 @@ body {
 
 .btn {
   display: inline-flex;
+  -webkit-user-select: none;
+  user-select: none;
   align-items: center;
   gap: 7px;
   padding: 8px 14px;
@@ -225,6 +265,23 @@ body {
   padding: 6px 11px;
   font-size: 13px;
   background: rgba(0, 0, 0, 0.42);
+}
+
+/* ------------------------------------------------------------------- chips */
+
+/* Global, not scoped: the control bar renders one of these itself and
+   StreamMenu renders another as its own root button. */
+.chip {
+  padding: 3px 8px;
+  margin-right: 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* --------------------------------------------------------------- dropzone */
@@ -379,7 +436,7 @@ body {
   cursor: pointer;
   z-index: 10;
   backdrop-filter: blur(4px);
-  transition: background 0.16s ease, transform 0.12s ease;
+  transition: background 0.16s ease, transform 0.16s ease, opacity 0.22s ease;
 }
 
 .bigplay:hover {
@@ -472,4 +529,5 @@ body {
 
 @media (max-width: 620px) {
   .topbar__meta { display: none; }
+  .chip { display: none; }
 }

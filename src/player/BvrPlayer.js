@@ -76,6 +76,10 @@ export class BvrPlayer {
       hasSubStream: false,
       hasMainStream: false,
       switchingMode: false,
+      mainWidth: 0,
+      mainHeight: 0,
+      subWidth: 0,
+      subHeight: 0,
       startUtc: 0,
       currentUtc: 0,
       truncated: false,
@@ -125,7 +129,11 @@ export class BvrPlayer {
         truncated: this.index.truncated,
         hasMainStream: this.index.streams[0].count > 0,
         hasSubStream: this.index.streams[1].count > 0,
-        switchingMode: this.index.switchingMode
+        switchingMode: this.index.switchingMode,
+        mainWidth: this.header.bmih[0]?.width || 0,
+        mainHeight: this.header.bmih[0]?.height || 0,
+        subWidth: this.header.bmih[1]?.width || 0,
+        subHeight: this.header.bmih[1]?.height || 0
       })
 
       this._start()

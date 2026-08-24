@@ -28,7 +28,7 @@ additionally need platform HEVC decode support (should work on most modern devic
 
 The skip interval (default 10 s), time display (elapsed or wall clock), loop, and
 — for dual-stream recordings — the main/sub stream selection live in the settings
-menu and persist in `localStorage`.
+menu and persist in the web browser's `localStorage`.
 
 
 ## Technical Details for Developers
@@ -54,7 +54,14 @@ npm run dev
 
 `npm run build` regenerates the PWA icons and writes the single-file bundle plus
 the PWA side-files to `docs/`. That directory is committed on purpose — it is
-what GitHub Pages serves and what you double-click.
+what GitHub Pages serves and what you double-click. `build.bat` does the same
+from Explorer or a plain `cmd` window, installing dependencies first if
+`node_modules` is missing; pass `nopause` to skip the prompt at the end.
+
+The service worker is registered only in production builds. It is cache-first
+over every same-origin GET, so on the dev server it would pin each edited module
+to whatever was cached first; a dev page instead unregisters any worker left
+behind by a production build loaded from the same origin.
 
 Put `.bvr` files in `sample/` for local testing; that folder is git-ignored.
 
