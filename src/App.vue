@@ -576,6 +576,9 @@ export default {
       }
     },
     openLibrary () {
+      // The browser covers the whole window, so playback would run on unseen -
+      // and unpausable, with Space suppressed below - behind it.
+      this.player.pause()
       this.libraryOpen = true
       this.wakeUi()
     },
@@ -1165,8 +1168,9 @@ export default {
       // Both the page scroll and the focused control's own activation.
       event.preventDefault()
       event.stopPropagation()
-      // Deliberately still play/pause with the folder browser up: opening it
-      // does not stop the recording, so the space bar is how it is silenced.
+      // The folder browser covers the whole window and opening it pauses, so
+      // there is nothing behind it for Space to act on.
+      if (this.libraryOpen) return
       this.togglePlay()
       this.wakeUi()
     },
