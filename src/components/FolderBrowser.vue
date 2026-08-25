@@ -136,20 +136,28 @@
       </div>
 
       <div v-else-if="!total" class="library__center">
-        <AppIcon name="library" :size="34" />
-        <p class="library__lead">Browse a folder of recordings</p>
-        <p class="library__hint">
-          Every <code>.bvr</code> file in the folder is listed with a thumbnail from its first
-          key frame. Nothing is uploaded, and only a few hundred kilobytes of each file is read.
-        </p>
-        <button type="button" class="btn btn--accent" @click="choose">
-          <AppIcon name="folder" :size="17" />
-          <span>Choose folder</span>
-        </button>
-        <p v-if="!supported" class="library__hint library__hint--warn">
-          Folder browsing needs the page to be served over http(s). Opened straight off disk,
-          the player can still open one file at a time.
-        </p>
+          <AppIcon name="library" :size="34" />
+          <p class="library__lead">Browse a folder of recordings</p>
+          <p class="library__hint">
+              Every <code>.bvr</code> file in the folder is listed with a thumbnail from its first
+              key frame.
+          </p>
+          <p class="library__hint">
+              NOTE 1: Your web browser might ask for permission to upload files to the "site",
+              but that is just the standard warning for granting folder browser permission.  This app
+              does not upload anything anywhere.
+          </p>
+          <p class="library__hint">
+              NOTE 2: It is recommended to not open very large folders over network shares; that is very slow and may cause the browser to become unresponsive, requiring you to end the browser processes to recover.
+          </p>
+          <button type="button" class="btn btn--accent" @click="choose">
+              <AppIcon name="folder" :size="17" />
+              <span>Choose folder</span>
+          </button>
+          <p v-if="!supported" class="library__hint library__hint--warn">
+              Folder browsing needs the page to be served over http(s). Opened straight off disk,
+              the player can still open one file at a time.
+          </p>
       </div>
 
       <p v-else-if="!matched" class="library__center">Nothing matches “{{ query }}”.</p>
@@ -1117,7 +1125,7 @@ export default {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .clip__noshot,
