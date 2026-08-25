@@ -3,6 +3,8 @@
 A web-based player for Blue Iris `.bvr` files. Everything runs locally in the
 browser.  Your files are never uploaded anywhere.
 
+When opening a folder of files, *the browser may say* it is going to upload files to *this site*, but in reality "this site" is just a static HTML file running in your web browser.  **Your files will not actually be uploaded anywhere.**
+
 ## Using it
 
 https://bp2008.github.io/BVR-Player-Web/
@@ -49,4 +51,3 @@ space.
   feature behaves in detail.
 - [BVR_File_Format_Spec.md](BVR_File_Format_Spec.md) — the container format,
   provided by the Blue Iris developer.
-- [PLANNED_FEATURES.md](PLANNED_FEATURES.md) — roadmap notes.

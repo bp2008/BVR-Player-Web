@@ -9,6 +9,7 @@ design rationale, and those have a habit of creeping in.
 
 Anything longer than a few lines of "how it works", "why it was built this way",
 or in-depth behaviour of a feature belongs in [Development.md](Development.md),
-not the README. Roadmap notes go in `PLANNED_FEATURES.md`, format details in
+not the README — including roadmap notes and the reasoning behind decisions that
+were made and later changed. Format details go in
 `BVR_File_Format_Spec.md`. When adding a feature, add its deep description to
 `Development.md` and, at most, one table row or one sentence to `README.md`.
