@@ -13,7 +13,6 @@ import { MAX_ZOOM, MIN_ZOOM } from './Renderer.js'
  *   wheel / trackpad pinch  zoom about the pointer
  *   two-finger pinch        zoom about the midpoint, panning with it
  *   drag                    pan, once zoomed in
- *   double click / tap      reset, when zoomed
  *
  * A drag past a few pixels also suppresses the click that would otherwise
  * follow it, so panning never toggles playback on release.

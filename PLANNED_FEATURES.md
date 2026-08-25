@@ -60,9 +60,10 @@ In-app browsing of a directory of `.bvr` files, with a thumbnail per clip.
   pinch about the midpoint, drag to pan once zoomed, and a drag-versus-click
   latch so panning never toggles playback on release.
 - Zoom survives seeks, stream switches and fullscreen; it resets on a new file.
-- **Double click** resets zoom when zoomed and toggles fullscreen otherwise —
-  the roadmap wanted both on the same gesture, and this is the ordering that
-  reads naturally. <kbd>F</kbd> and the button still reach fullscreen either way.
+- **Double click** toggles fullscreen. It once reset the zoom when zoomed and
+  fell through to fullscreen otherwise, but one gesture meaning two things by
+  context was more surprising than useful; zoom now resets from <kbd>Z</kbd> or
+  the chip alone.
 - A zoom chip appears in the control bar while zoomed, and clicking it resets.
 
 ## 3. Export to MP4 — **done**

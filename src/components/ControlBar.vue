@@ -87,7 +87,7 @@
         v-if="state.zoomed"
         type="button"
         class="chip chip--button chip--zoom"
-        title="Reset zoom (double-click the video, or Z)"
+        title="Reset zoom (Z)"
         @click="$emit('reset-zoom')"
       >
         <AppIcon name="zoomIn" :size="13" />

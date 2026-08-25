@@ -661,10 +661,6 @@ export default {
       // click inside the stage - frame-step button, number spinner, chip -
       // bubbles up here.
       if (event.target !== this.$refs.canvas) return
-      // Zoomed in, the natural meaning of a double click is "back out"; that
-      // takes precedence over fullscreen, which the F key and the button still
-      // reach.
-      if (this.view && this.view.reset()) return
       this.toggleFullscreen()
     },
     resetZoom () {
