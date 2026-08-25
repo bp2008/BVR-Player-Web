@@ -83,6 +83,13 @@ export class ExportJob {
           : (TRANSCODE_CODECS.find((c) => c.value === plan.options.videoCodec) || TRANSCODE_CODECS[0]).entry,
         width: plan.outWidth,
         height: plan.outHeight,
+        // A remux cannot re-shape the pixels, so the shape goes in the container:
+        // the track header presents the corrected size and `pasp` says why. A
+        // transcode has already drawn the correction into the samples, so both
+        // are simply the output size and no `pasp` is written.
+        displayWidth: plan.trackWidth,
+        displayHeight: plan.trackHeight,
+        pasp: plan.pasp,
         timescale: VIDEO_TIMESCALE,
         config: null,
         name: plan.mode === MODE_REMUX ? 'BVR stream copy' : 'BVR re-encode'

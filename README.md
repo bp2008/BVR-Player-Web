@@ -84,6 +84,15 @@ panel lists each stream's real size with the header's declared size beside it
 where the two differ — so it is always visible whether a picture is being
 corrected, and by how much.
 
+Exports carry the correction too, by whichever route suits the method. **Copy
+frames** cannot touch the pixels, so it writes the corrected size into the MP4
+track header and a `pasp` pixel-aspect-ratio box beside the codec configuration —
+a 704×480 stream under a 4:3 header comes out as the textbook 10:11. **Re-encode**
+is redrawing every frame anyway, so it bakes the correction in and produces a
+square-pixel file, which is the simpler and more widely understood of the two;
+the resolution choices are then all of the corrected shape (704×528, 640×480,
+480×360 and so on). The export panel says which is happening.
+
 ### Snapshots
 
 The camera button, or <kbd>S</kbd>, saves the frame on screen as an image. The

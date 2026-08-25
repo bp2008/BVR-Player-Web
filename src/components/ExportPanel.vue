@@ -89,7 +89,7 @@
         <label class="export__field export__field--row">
           <span class="export__label">Resolution</span>
           <select class="settings__select" :value="options.maxHeight" @change="patch({ maxHeight: Number($event.target.value) })" @keydown.stop>
-            <option :value="0">Source ({{ plan.width }}&times;{{ plan.height }})</option>
+            <option :value="0">Source ({{ plan.displayWidth }}&times;{{ plan.displayHeight }})</option>
             <option v-for="h in heights" :key="h" :value="h">{{ h }}p</option>
           </select>
         </label>
@@ -118,7 +118,13 @@
       </label>
 
       <dl class="export__summary">
-        <div><dt>Output</dt><dd>{{ plan.outWidth }}&times;{{ plan.outHeight }} {{ methodLabel }}</dd></div>
+        <div>
+          <dt>Output</dt>
+          <dd>
+            {{ plan.outWidth }}&times;{{ plan.outHeight }} {{ methodLabel }}
+            <em v-if="aspectNote" class="export__aside">{{ aspectNote }}</em>
+          </dd>
+        </div>
         <div><dt>Frames</dt><dd>{{ plan.frames.toLocaleString() }}</dd></div>
         <div><dt>Estimated size</dt><dd>{{ formatBytes(plan.estimatedBytes) }}</dd></div>
         <div><dt>File name</dt><dd class="export__filename">{{ plan.fileName }}</dd></div>
@@ -194,11 +200,28 @@ export default {
           pstream: this.context.pstream,
           audioStarts: this.context.audioStarts,
           fileName: this.context.fileName,
+          reference: this.context.reference,
           options: { ...this.options, startMs: this.trim.start, endMs: this.trim.end }
         })
       } catch (e) {
         return null
       }
+    },
+    /**
+     * How the file will carry the shape correction, when there is one.
+     *
+     * Worth spelling out: the two modes reach the same picture by opposite
+     * routes, and which one is in force decides whether the output is a
+     * square-pixel file or one that leans on the container.
+     */
+    aspectNote () {
+      const p = this.plan
+      if (!p || !p.corrected) return ''
+      if (p.mode === 'remux' && p.pasp) {
+        return `shown as ${p.displayWidth}×${p.displayHeight} via a ${p.pasp.hSpacing}:${p.pasp.vSpacing} pixel aspect ratio`
+      }
+      if (p.mode === 'remux') return ''
+      return `rescaled from ${p.width}×${p.height} to square pixels`
     },
     methodLabel () {
       if (!this.plan) return ''
@@ -412,6 +435,16 @@ export default {
 }
 
 .export__filename {
+  overflow-wrap: anywhere;
+}
+
+/* A quieter second line under a summary value -- how the shape correction is
+   being carried, which only some files have anything to say about. */
+.export__aside {
+  display: block;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: normal;
   overflow-wrap: anywhere;
 }
 

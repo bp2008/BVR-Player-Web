@@ -2,6 +2,7 @@ import { frameIndexForTime } from '../bvr/indexer.js'
 import { canRemux, sampleEntryFor } from './bitstream.js'
 import { WAVE_FORMAT_FLAC, WAVE_FORMAT_PCM } from '../bvr/constants.js'
 import { audioCodecLabel, packetStartTimes } from '../player/audioCodecs.js'
+import { displaySize, pixelAspect } from '../util/aspect.js'
 
 /**
  * Works out what an export would actually do, before anything is written.
@@ -107,7 +108,7 @@ function videoRange (pstream, startMs, endMs, mode) {
  * stream selection the user can already see rather than introducing a second,
  * invisible one.
  */
-export function planExport ({ header, index, pstream, audioStarts, fileName, options }) {
+export function planExport ({ header, index, pstream, audioStarts, fileName, reference, options }) {
   const opts = { ...DEFAULT_OPTIONS, ...options }
   const warnings = []
   const errors = []
@@ -162,10 +163,21 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, opt
     ? videoBytes + Math.round(frames * 8) + (audio.include ? (spanMs / 1000) * (opts.audioBitrate / 8) : 0)
     : Math.round((spanMs / 1000) * ((opts.videoBitrate + (audio.include ? opts.audioBitrate : 0)) / 8))
 
-  const outHeight = opts.maxHeight > 0 ? Math.min(opts.maxHeight, pstream.height) : pstream.height
-  const scale = pstream.height > 0 ? outHeight / pstream.height : 1
-  // Encoders reject odd dimensions for 4:2:0 chroma.
-  const outWidth = Math.max(2, Math.round((pstream.width * scale) / 2) * 2)
+  // The shape the player is showing this stream in. A remux cannot change the
+  // pixels, so it says so in the container instead; a transcode is re-drawing
+  // every frame anyway, so it bakes the correction in and comes out square-pixel,
+  // which is the simpler and more widely understood file of the two.
+  const target = reference ? reference.ratio : 0
+  const shown = displaySize(pstream.width, pstream.height, target)
+  const pasp = mode === MODE_REMUX ? pixelAspect(pstream.width, pstream.height, reference) : null
+
+  // Encoders reject odd dimensions for 4:2:0 chroma, and the corrected size is
+  // as likely to be odd as any other.
+  const even = (v) => Math.max(2, Math.round(v / 2) * 2)
+  const capHeight = opts.maxHeight > 0 ? Math.min(opts.maxHeight, shown.height) : shown.height
+  const scale = shown.height > 0 ? capHeight / shown.height : 1
+  const outHeight = even(capHeight)
+  const outWidth = even(shown.width * scale)
 
   return {
     mode,
@@ -179,10 +191,23 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, opt
     frames,
     fourcc,
     entry: sampleEntryFor(fourcc),
+    // The coded size: what the samples in the file are, whichever mode runs.
     width: pstream.width,
     height: pstream.height,
+    // The shape it should be seen in, before any resolution cap.
+    displayWidth: shown.width,
+    displayHeight: shown.height,
+    // The size of the samples written out.
     outWidth: mode === MODE_TRANSCODE ? outWidth : pstream.width,
     outHeight: mode === MODE_TRANSCODE ? outHeight : pstream.height,
+    // The size a player should present them at -- the track header's own
+    // dimensions. For a transcode these are the sample dimensions; for a remux
+    // they are the corrected ones, and `pasp` carries the same correction for
+    // players that read it in preference.
+    trackWidth: mode === MODE_TRANSCODE ? outWidth : shown.width,
+    trackHeight: mode === MODE_TRANSCODE ? outHeight : shown.height,
+    pasp,
+    corrected: shown.width !== pstream.width || shown.height !== pstream.height,
     audio,
     estimatedBytes,
     warnings,

@@ -351,8 +351,8 @@ export class BvrPlayer {
    * readers treat the first as describing the stream they have, so bmih[0] is
    * the right reference whichever streams the file turns out to hold.
    */
-  _targetAspect () {
-    if (!this.matchAspect || !this.header) return 0
+  _referenceShape () {
+    if (!this.matchAspect || !this.header) return null
     for (const bmih of [this.header.bmih[0], this.header.bmih[1]]) {
       const w = bmih ? bmih.width : 0
       const h = bmih ? bmih.height : 0
@@ -360,9 +360,16 @@ export class BvrPlayer {
       const ratio = w / h
       // A header carrying a nonsense resolution is worse than no reference.
       if (ratio < 0.2 || ratio > 5) continue
-      return ratio
+      // The two integers are kept, not just their quotient: an export turns them
+      // into an exact MP4 pixel aspect ratio, which a float cannot do.
+      return { width: w, height: h, ratio }
     }
-    return 0
+    return null
+  }
+
+  _targetAspect () {
+    const reference = this._referenceShape()
+    return reference ? reference.ratio : 0
   }
 
   /** Each stream's real picture size, as the probe read it out of the bitstream. */
@@ -759,6 +766,9 @@ export class BvrPlayer {
       index: this.index,
       pstream: this.pstream,
       fileName: this._state.fileName,
+      // The shape the picture is being shown in, so an export comes out looking
+      // like what was on screen. Null when the correction is switched off.
+      reference: this._referenceShape(),
       // The probe already settled this against a real key frame, and it is what
       // a transcode has to configure its decoder with.
       decoderConfig: this.codecInfo && this.codecInfo.kind === 'video' ? this.codecInfo.config : null,

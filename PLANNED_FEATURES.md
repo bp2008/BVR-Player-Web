@@ -209,6 +209,29 @@ consequence of their having been overlays.
   panel and the MP4 track header an export writes now all carry the size the
   pictures really are, with the declared size shown alongside where they differ.
 
+  The rule itself lives in `src/util/aspect.js` rather than in the renderer,
+  because the exporter has to reach the same answer: a saved clip that plays at a
+  different shape from the one that was on screen would be a worse bug than the
+  one this exists to fix.
+
+- **Aspect ratio in exported MP4s — done.** The two export methods carry the
+  correction by opposite routes, which is the point. A stream copy cannot touch
+  the pixels, so it says so in the container: the `tkhd` display size becomes the
+  corrected one -- it was previously the coded size, which is what the *sample
+  entry* is for -- and a `pasp` box (ISO 14496-12 8.5.2) goes in beside the codec
+  configuration. The spacings are derived from the header's two integers rather
+  than from their quotient, so they come out exact: 704x480 under a 1600x1200
+  header is 10:11, the textbook NTSC D1 value, where a float would have produced
+  whatever six-figure pair the rounding landed on.
+
+  A re-encode is redrawing every frame regardless, so it scales to the corrected
+  size and writes a square-pixel file with no `pasp` at all -- simpler, and
+  understood by everything, including the players that quietly ignore pixel
+  aspect ratios. The resolution cap then works from the corrected shape, so
+  "480p" on a 704x480 sub stream under a 4:3 header means 640x480 rather than
+  704x480. Both output dimensions are rounded to even numbers: the corrected size
+  is as likely to be odd as any other, and 4:2:0 encoders reject odd dimensions.
+
 - **Snapshots — done.** The camera button, or `S`, saves the frame on screen.
   The picture is taken synchronously before anything is awaited, so what is saved
   is the frame that was on screen when the button was pressed however long the

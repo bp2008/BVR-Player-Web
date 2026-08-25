@@ -9,6 +9,8 @@
  * picture under rotation, flip and zoom alike.
  */
 
+import { correctedSize } from '../util/aspect.js'
+
 export const MIN_ZOOM = 1
 export const MAX_ZOOM = 16
 
@@ -72,23 +74,13 @@ export class Renderer {
 
   /**
    * The size a frame is drawn at: its own, unless a display aspect is in force
-   * and the frame disagrees with it.
-   *
-   * The short axis is stretched rather than the long one cropped. Cropping would
-   * discard picture the recording does contain, and a mismatched surveillance
-   * sub stream is squeezed rather than cropped in the first place -- undoing the
-   * squeeze is exactly what restores it.
+   * and the frame disagrees with it. The rule itself is shared with the exporter
+   * so that a saved clip cannot come out a different shape from the one that was
+   * on screen.
    */
   _effective (sw, sh) {
-    const target = this.displayAspect
-    if (!target || !(sw > 0) || !(sh > 0)) return { w: sw, h: sh }
-    const native = sw / sh
-    // A percent of slack: encoders round to macroblocks, and re-shaping a
-    // picture that is already the right shape only costs sharpness.
-    if (Math.abs(native - target) <= target * 0.01) return { w: sw, h: sh }
-    return native < target
-      ? { w: sh * target, h: sh }
-      : { w: sw, h: sw / target }
+    const out = correctedSize(sw, sh, this.displayAspect)
+    return { w: out.width, h: out.height }
   }
 
   /** Matches the backing store to the element box; returns true when it changed. */

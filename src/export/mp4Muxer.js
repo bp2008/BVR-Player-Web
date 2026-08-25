@@ -122,11 +122,23 @@ export class Mp4Muxer {
     this._started = false
   }
 
-  addVideoTrack ({ entry, width, height, config, timescale, name = 'BVR video' }) {
+  /**
+   * `width`/`height` are the coded size -- what the samples decode to.
+   * `displayWidth`/`displayHeight` are the size a player should present them at,
+   * which differs whenever the pixels are not square; `pasp` states the same
+   * correction per pixel, for the players that prefer it to the track header.
+   */
+  addVideoTrack ({
+    entry, width, height, config, timescale, name = 'BVR video',
+    displayWidth = 0, displayHeight = 0, pasp = null
+  }) {
     const t = new Track(this.tracks.length + 1, 'video', timescale)
     t.entry = entry
     t.width = width
     t.height = height
+    t.displayWidth = displayWidth > 0 ? displayWidth : width
+    t.displayHeight = displayHeight > 0 ? displayHeight : height
+    t.pasp = pasp
     t.config = config
     t.name = name
     this.tracks.push(t)
@@ -249,9 +261,10 @@ export class Mp4Muxer {
       u16(track.kind === 'audio' ? 0x0100 : 0),
       u16(0),
       u32Array(UNITY_MATRIX),
-      // Display size is 16.16 fixed point; audio tracks have none.
-      u32(track.kind === 'video' ? track.width * 65536 : 0),
-      u32(track.kind === 'video' ? track.height * 65536 : 0))
+      // Display size is 16.16 fixed point, and it is the *presentation* size --
+      // not the coded one, which lives in the sample entry. Audio has none.
+      u32(track.kind === 'video' ? Math.round(track.displayWidth * 65536) : 0),
+      u32(track.kind === 'video' ? Math.round(track.displayHeight * 65536) : 0))
 
     const mdhd = fullBox('mdhd', 0, 0,
       u32(now), u32(now), u32(track.timescale), u32(track.duration),
@@ -338,6 +351,13 @@ export class Mp4Muxer {
     const configBox = track.entry === 'hvc1'
       ? box('hvcC', track.config)
       : box('avcC', track.config)
+    // ISO 14496-12 8.5.2: a PixelAspectRatio box sits alongside the codec
+    // configuration in the sample entry. It is how a file says its pixels are
+    // not square -- which is exactly the case a Blue Iris stream encoded at a
+    // different shape from the one its header declares is in.
+    const extras = track.pasp
+      ? [box('pasp', u32(track.pasp.hSpacing), u32(track.pasp.vSpacing))]
+      : []
     return box(track.entry,
       u8(0, 0, 0, 0, 0, 0),               // reserved
       u16(1),                             // data_reference_index
@@ -349,7 +369,8 @@ export class Mp4Muxer {
       pascal32(track.name),
       u16(0x0018),                        // depth: colour, no alpha
       s16(-1),                            // pre_defined
-      configBox)
+      configBox,
+      ...extras)
   }
 
   _audioEntry (track) {
