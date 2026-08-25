@@ -41,7 +41,7 @@ export function resolveStreamMode (index, playable, requested) {
  * decodable here and share a codec, since the merged sequence goes through a
  * single decoder.
  */
-export function buildPlaybackStream (index, header, mode, playable = [true, true]) {
+export function buildPlaybackStream (index, header, mode, playable = [true, true], sizes = null) {
   const [main, sub] = index.streams
   const usable = usableStreams(index, playable)
   const wantSwitching = mode === 'auto' && index.switchingMode &&
@@ -53,7 +53,7 @@ export function buildPlaybackStream (index, header, mode, playable = [true, true
     const other = si === STREAM_MAIN ? STREAM_SUB : STREAM_MAIN
     // Fall back when the chosen stream is absent or cannot be decoded here.
     if (!usable[si] && (usable[other] || index.streams[si].count === 0)) si = other
-    return decorate(index.streams[si], si, header, index)
+    return decorate(index.streams[si], si, header, index, sizes)
   }
 
   const keep = []
@@ -82,8 +82,8 @@ export function buildPlaybackStream (index, header, mode, playable = [true, true
   out.mode = 'auto'
   out.codecSource = STREAM_MAIN
   out.streamLabel = 'Auto (main + sub)'
-  out.width = Math.max(header.bmih[0]?.width || 0, header.bmih[1]?.width || 0)
-  out.height = Math.max(header.bmih[0]?.height || 0, header.bmih[1]?.height || 0)
+  out.width = Math.max(sizeOf(header, sizes, 0).width, sizeOf(header, sizes, 1).width)
+  out.height = Math.max(sizeOf(header, sizes, 0).height, sizeOf(header, sizes, 1).height)
   out.fourcc = header.bmih[0]?.fourcc || header.bmih[1]?.fourcc
   out.variableResolution = true
   return out
@@ -117,8 +117,24 @@ function computeKeys (s) {
   s.keys = Int32Array.from(keys)
 }
 
-function decorate (src, si, header, index) {
+/**
+ * A stream's picture size: what the probe read out of the bitstream when it
+ * could, and the header's declared size otherwise. The two disagree often
+ * enough that everything downstream -- the MP4 track header an export writes,
+ * the resolution the panels report -- wants the real one.
+ */
+function sizeOf (header, sizes, si) {
+  const probed = sizes && sizes[si]
   const bmih = header.bmih[si] || header.bmih[0]
+  return {
+    width: (probed && probed.width) || bmih?.width || 0,
+    height: (probed && probed.height) || bmih?.height || 0
+  }
+}
+
+function decorate (src, si, header, index, sizes) {
+  const bmih = header.bmih[si] || header.bmih[0]
+  const size = sizeOf(header, sizes, si)
   return {
     count: src.count,
     offset: src.offset,
@@ -135,8 +151,8 @@ function decorate (src, si, header, index) {
     codecSource: si,
     mode: si === STREAM_SUB ? 'sub' : 'main',
     streamLabel: si === STREAM_SUB ? 'Sub stream' : 'Main stream',
-    width: bmih?.width || 0,
-    height: bmih?.height || 0,
+    width: size.width,
+    height: size.height,
     fourcc: bmih?.fourcc || '',
     _srcIndex: si,
     _index: index

@@ -105,8 +105,14 @@ async function describeStream (reader, header, si, key) {
     present: true,
     hasKeyFrame: !!key,
     fourcc: bmih?.fourcc || '',
+    // What the pictures are, from the bitstream where it could be read.
     width: codec.width,
     height: codec.height,
+    // What the header says they are. The two disagree more often than not on a
+    // Blue Iris sub stream, and the difference is the whole of §"Match stream
+    // shapes" -- see BvrPlayer._targetAspect.
+    declaredWidth: codec.declaredWidth,
+    declaredHeight: codec.declaredHeight,
     codec,
     supported,
     reason

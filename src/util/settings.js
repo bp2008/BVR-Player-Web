@@ -13,11 +13,21 @@ export const DEFAULT_SETTINGS = {
   autoplay: true,
   timeDisplay: 'elapsed', // 'elapsed' | 'clock'
   streamMode: 'auto',
-  // Blue Iris sub streams are routinely a different shape from the main stream
-  // they accompany. Stretching them to the main stream's aspect is right far
-  // more often than not, so it is on -- but it is a guess, and a guess the
-  // viewer can decline.
+  // Cameras routinely encode a picture of a different shape from the one Blue
+  // Iris asked them for, most visibly on sub streams. Showing every stream in
+  // the shape the header claims is right far more often than not, so it is on --
+  // but it is a guess, and a guess the viewer can decline.
   matchAspect: true,
+
+  // Snapshots. JPEG at 85 is the photographic default; WebP is offered for the
+  // roughly two-thirds smaller file but is not the default, because a still that
+  // some other program refuses to open is worse than a larger one.
+  snapshotFormat: 'jpeg',  // 'jpeg' | 'webp'
+  snapshotQuality: 85,
+  // Writing into the folder being browsed skips the downloads bar, which
+  // interrupts the picture on every save. It needs write permission on that
+  // folder, so it is opt-in.
+  snapshotToFolder: false,
   // Speed is deliberately not persisted across files -- see App.openFile. It
   // lives here only so the settings panel has one place to read and write.
   playbackRate: 1,
@@ -82,6 +92,8 @@ export function loadSettings () {
     out.skipSeconds = Math.min(600, Math.max(1, Math.round(out.skipSeconds) || 10))
     out.volume = Math.min(1, Math.max(0, out.volume))
     out.playbackRate = Math.min(16, Math.max(0.05, out.playbackRate || 1))
+    out.snapshotQuality = Math.min(100, Math.max(1, Math.round(out.snapshotQuality) || 85))
+    if (out.snapshotFormat !== 'webp') out.snapshotFormat = 'jpeg'
     if (out.libraryView !== 'list') out.libraryView = 'grid'
     out.panelSides = readSides(parsed.panelSides)
     out.panelOrder = readOrder(parsed.panelOrder)

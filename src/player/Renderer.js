@@ -44,16 +44,30 @@ export class Renderer {
   /**
    * Forces every frame to a given display aspect ratio, or 0 for none.
    *
-   * A recording with two streams may hold two differently shaped pictures of
-   * the same scene -- 1920x1080 alongside a 640x480 sub stream is ordinary Blue
-   * Iris output -- and in switching mode the two arrive interleaved, so without
-   * this the picture changes shape mid-playback. The camera's real field of view
-   * is the one the high-resolution stream describes, so that is the shape both
-   * are shown in.
+   * Blue Iris records the resolution it asked each camera for, and the encoder
+   * does not always oblige: a sub stream declared 640x480 arriving encoded
+   * 704x480 is ordinary output, and in switching mode it arrives interleaved
+   * with a main stream of yet another shape, so without this the picture is
+   * stretched sideways and changes shape mid-playback. The header's declared
+   * shape is the field of view the recording claims, so that is the shape
+   * everything is shown in.
    */
   setDisplayAspect (aspect) {
     const a = Number(aspect)
     this.displayAspect = Number.isFinite(a) && a > 0 ? a : 0
+  }
+
+  /**
+   * The whole-pixel size a picture of `sw` x `sh` ends up being drawn at.
+   *
+   * Public because the UI has to be able to say whether a stream is being
+   * rescaled, and answering that anywhere but here would be a second copy of
+   * the rule in _effective.
+   */
+  presentedSize (sw, sh) {
+    if (!(sw > 0) || !(sh > 0)) return { width: 0, height: 0 }
+    const { w, h } = this._effective(sw, sh)
+    return { width: Math.round(w), height: Math.round(h) }
   }
 
   /**
@@ -233,6 +247,66 @@ export class Renderer {
     }
     ctx.restore()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
+  }
+
+  /**
+   * Renders a frame into a canvas of its own, for saving to disk.
+   *
+   * The whole picture, at the size it is presented in: aspect corrected,
+   * rotated, flipped and overlaid exactly as on screen, but with none of the
+   * things that belong to the viewport rather than to the picture -- no
+   * letterbox bars, and no digital zoom crop, so a snapshot taken while zoomed
+   * in still holds every pixel the recording has.
+   *
+   * Overlay line and glyph sizes are specified in device pixels, so they are
+   * given the on-screen fit as their scale: what is saved then matches what was
+   * being looked at, instead of hairlines on a 2688-pixel-wide still. The clamp
+   * keeps a docked-down or enormous stage from carrying that too far.
+   */
+  snapshot (frame = this.lastFrame) {
+    if (!frame) return null
+    const fw = frame.displayWidth || frame.width || 0
+    const fh = frame.displayHeight || frame.height || 0
+    if (!fw || !fh) return null
+
+    const { w: sw, h: sh } = this._effective(fw, fh)
+    const swap = this.rotation === 90 || this.rotation === 270
+    const outW = Math.max(1, Math.round(swap ? sh : sw))
+    const outH = Math.max(1, Math.round(swap ? sw : sh))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = outW
+    canvas.height = outH
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) return null
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, outW, outH)
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+
+    ctx.save()
+    ctx.translate(outW / 2, outH / 2)
+    if (this.rotation) ctx.rotate((this.rotation * Math.PI) / 180)
+    if (this.flipH) ctx.scale(-1, 1)
+    ctx.drawImage(frame, -sw / 2, -sh / 2, sw, sh)
+
+    if (this.overlayPainter) {
+      const fit = this._geom ? this._geom.fit : 1
+      ctx.translate(-sw / 2, -sh / 2)
+      try {
+        this.overlayPainter(ctx, {
+          width: sw,
+          height: sh,
+          scale: clamp(fit, 0.15, 2),
+          rotation: this.rotation,
+          flipH: this.flipH
+        })
+      } catch {
+        // A still without its overlays is still worth saving.
+      }
+    }
+    ctx.restore()
+    return canvas
   }
 
   /** Re-draws the last presented frame, e.g. after a resize or a zoom change. */

@@ -84,7 +84,7 @@
 
     <label class="spanel__row spanel__row--toggle">
       <span class="spanel__label">
-        Match stream shapes
+        Match declared shape
         <em class="spanel__sub">{{ aspectSummary }}</em>
       </span>
       <input
@@ -109,6 +109,65 @@
         <option value="elapsed">Elapsed</option>
         <option value="clock">Wall clock</option>
       </select>
+    </label>
+
+    <h3 class="spanel__h">Snapshots</h3>
+
+    <label class="spanel__row">
+      <span class="spanel__label">
+        Image format
+        <em class="spanel__sub">{{ formatSummary }}</em>
+      </span>
+      <select
+        class="settings__select"
+        :value="settings.snapshotFormat"
+        @change="emitPatch({ snapshotFormat: $event.target.value })"
+        @keydown.stop
+        @dblclick.stop
+      >
+        <option
+          v-for="f in formats"
+          :key="f.value"
+          :value="f.value"
+          :disabled="f.disabled"
+        >{{ f.label }}</option>
+      </select>
+    </label>
+
+    <label class="spanel__row">
+      <span class="spanel__label">Quality</span>
+      <span class="spanel__control">
+        <input
+          class="settings__number"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="100"
+          step="1"
+          :value="settings.snapshotQuality"
+          @input="onQualityInput"
+          @change="onQualityCommit"
+          @keydown.stop
+          @dblclick.stop
+        />
+        <span class="spanel__unit">%</span>
+      </span>
+    </label>
+
+    <label class="spanel__row spanel__row--toggle" :class="{ 'spanel__row--off': !canSaveToFolder }">
+      <span class="spanel__label">
+        Save into the open folder
+        <em class="spanel__sub">{{ folderSummary }}</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.snapshotToFolder && canSaveToFolder"
+        :disabled="!canSaveToFolder"
+        @change="emitPatch({ snapshotToFolder: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
     </label>
 
     <template v-if="state.hasMetadata">
@@ -154,6 +213,7 @@
       <span><kbd>Z</kbd> reset zoom</span>
       <span><kbd>I</kbd> metadata</span>
       <span><kbd>E</kbd> export</span>
+      <span><kbd>S</kbd> snapshot</span>
       <span><kbd>O</kbd> open file</span>
       <span><kbd>L</kbd> browse folder</span>
     </div>
@@ -163,6 +223,8 @@
 <script>
 import { streamOptions } from '../util/streams.js'
 import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
+import { SNAPSHOT_FORMATS, canEncodeWebp } from '../player/snapshot.js'
+import { canPickDirectory } from '../library/directory.js'
 
 /**
  * The settings panel.
@@ -176,7 +238,10 @@ export default {
   name: 'SettingsPanel',
   props: {
     settings: { type: Object, required: true },
-    state: { type: Object, required: true }
+    state: { type: Object, required: true },
+    /** The folder the browser has open, and what to call it. */
+    hasSnapshotFolder: { type: Boolean, default: false },
+    snapshotFolder: { type: String, default: '' }
   },
   emits: ['patch', 'stream', 'overlay', 'rate'],
   data () {
@@ -195,18 +260,84 @@ export default {
     streamOptions () {
       return streamOptions(this.state)
     },
-    /** Says what the setting is actually doing to the file that is open. */
+    /**
+     * Says what the setting is actually doing to the file that is open, in the
+     * file's own numbers.
+     *
+     * Worth the specificity: the correction exists because a header's declared
+     * resolution and an encoder's real one disagree, and the only way to judge
+     * whether the guess is the right one here is to see both.
+     */
     aspectSummary () {
-      if (!this.state.hasMainStream || !this.state.hasSubStream) {
-        return 'One stream in this file — nothing to match'
+      const s = this.state
+      if (s.status !== 'ready') return 'Show every stream in the shape the recording declares'
+      if (!this.settings.matchAspect) return 'Each stream shown exactly as encoded'
+      if (!s.displayAspect) return 'This recording declares no usable shape'
+      const target = `${s.displayAspect.toFixed(3)}:1`
+      if (!s.displayWidth || (s.displayWidth === s.width && s.displayHeight === s.height)) {
+        return `${s.width}×${s.height} is already ${target}${this.otherStreamNote}`
       }
-      if (!this.settings.matchAspect) return 'Each stream shown as encoded'
-      if (!this.state.displayAspect) return 'Both streams are already the same shape'
-      const ratio = this.state.displayAspect
-      return `Stretching to ${ratio.toFixed(2)}:1, from the larger stream`
+      return `${s.width}×${s.height} shown as ${s.displayWidth}×${s.displayHeight} (${target})`
+    },
+    /** Whether the stream that is *not* on screen needs the correction. */
+    otherStreamNote () {
+      const s = this.state
+      if (!s.hasMainStream || !s.hasSubStream || !s.displayAspect) return ''
+      const other = s.streamMode === 'sub'
+        ? { w: s.mainWidth, h: s.mainHeight, name: 'main' }
+        : { w: s.subWidth, h: s.subHeight, name: 'sub' }
+      if (!(other.w > 0) || !(other.h > 0)) return ''
+      const native = other.w / other.h
+      if (Math.abs(native - s.displayAspect) <= s.displayAspect * 0.01) return ''
+      return `; the ${other.name} stream's ${other.w}×${other.h} is corrected`
+    },
+
+    // -------------------------------------------------------------- snapshots
+    formats () {
+      const webp = canEncodeWebp()
+      return SNAPSHOT_FORMATS.map((f) => ({
+        value: f.value,
+        label: f.value === 'webp' && !webp ? 'WebP (not available here)' : f.label,
+        disabled: f.value === 'webp' && !webp
+      }))
+    },
+    formatSummary () {
+      const q = this.settings.snapshotQuality
+      return this.settings.snapshotFormat === 'webp'
+        ? `WebP at ${q}% — smaller files, fewer programs read them`
+        : `JPEG at ${q}% — opens anywhere`
+    },
+    /** Writing into a folder needs the directory API and a folder to write to. */
+    canSaveToFolder () {
+      return canPickDirectory() && this.hasSnapshotFolder
+    },
+    folderSummary () {
+      if (!canPickDirectory()) return 'This browser cannot write to a folder'
+      if (!this.hasSnapshotFolder) return 'Browse a folder first, then this can be turned on'
+      if (!this.settings.snapshotToFolder) return 'Otherwise stills download as files'
+      return `Writing into ${this.snapshotFolder}`
     }
   },
   methods: {
+    clampQuality (raw) {
+      const n = Math.round(Number(raw))
+      if (!Number.isFinite(n)) return this.settings.snapshotQuality
+      return Math.min(100, Math.max(1, n))
+    },
+    /** Same live-but-only-when-valid rule as the skip interval below. */
+    onQualityInput (event) {
+      const raw = event.target.value
+      if (raw === '') return
+      const n = Number(raw)
+      if (!Number.isFinite(n)) return
+      const clamped = this.clampQuality(n)
+      if (clamped === n) this.emitPatch({ snapshotQuality: clamped })
+    },
+    onQualityCommit (event) {
+      const clamped = this.clampQuality(event.target.value)
+      event.target.value = String(clamped)
+      this.emitPatch({ snapshotQuality: clamped })
+    },
     clampSkip (raw) {
       const n = Math.round(Number(raw))
       if (!Number.isFinite(n)) return this.settings.skipSeconds
@@ -272,6 +403,13 @@ export default {
 
 .spanel__row--toggle {
   cursor: pointer;
+}
+
+/* A row whose control cannot do anything yet still explains itself, so it is
+   dimmed rather than hidden. */
+.spanel__row--off {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .spanel__label {

@@ -163,7 +163,18 @@
           @toggle-panel="togglePanel"
           @trim="onTrim"
           @menu-open="onMenuOpen"
+          @snapshot="saveSnapshot"
         />
+
+        <!-- One element per snapshot, each running its own animation and each
+             thrown away when it finishes. Sharing one would mean restarting an
+             animation mid-flight, and a burst of snapshots would read as a
+             single long flash rather than as one cue per still. -->
+        <div class="snapcues" aria-hidden="true">
+          <span v-for="id in snapCues" :key="id" class="snapcue">
+            <span class="snapcue__badge"><AppIcon name="photoCamera" :size="40" /></span>
+          </span>
+        </div>
       </div>
     </div>
 
@@ -193,6 +204,8 @@
             v-if="id === 'settings'"
             :settings="settings"
             :state="state"
+            :snapshot-folder="snapshotFolderName"
+            :has-snapshot-folder="snapshotFolderReady"
             @patch="patchSettings"
             @stream="onStream"
             @overlay="onOverlay"
@@ -230,6 +243,7 @@
       @open="onLibraryOpen"
       @patch="patchSettings"
       @notice="showNotice"
+      @folder="onFolderOpened"
     />
 
     <div v-if="dragDepth > 0" class="dragmask">
@@ -266,7 +280,11 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import PanelFrame from './components/PanelFrame.vue'
 import { BvrPlayer, createBlankState, PLAYBACK_RATES } from './player/BvrPlayer.js'
 import { ViewController } from './player/ViewController.js'
-import { canBrowseDirectories, openEntry } from './library/directory.js'
+import {
+  canBrowseDirectories, canPickDirectory, directoryPermission, openEntry, writeFileTo
+} from './library/directory.js'
+import { loadDirectoryHandle } from './library/thumbCache.js'
+import { downloadSnapshot, encodeSnapshot, snapshotName } from './player/snapshot.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { formatBytes } from './util/format.js'
 import { PANELS, panelDef } from './panels/panels.js'
@@ -282,6 +300,10 @@ const UI_IDLE_TOUCH_MS = 4200
 const CHROME_SELECTOR = '.topbar, .controlbar, .dock'
 
 const SIDES = ['left', 'right']
+
+// Long enough for the cue's own animation to finish; the element is only kept
+// alive to be animated, so it is dropped a beat afterwards.
+const SNAP_CUE_MS = 700
 
 const blankPanelMap = (value) => Object.fromEntries(PANELS.map((p) => [p.id, value]))
 
@@ -330,6 +352,16 @@ export default {
 
       fileContext: null,
       trim: { start: 0, end: 0 },
+
+      // ----------------------------------------------------------- snapshots
+      // Ids of the cues currently on screen, one per still saved.
+      snapCues: [],
+      // The folder stills may be written into, once one has been opened. The
+      // handle itself is not reactive (see snapshotDir); these two are what the
+      // settings panel needs to describe it.
+      snapshotFolderName: '',
+      snapshotFolderReady: false,
+
       canBrowse: canBrowseDirectories(),
       webCodecsOk: typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined'
     }
@@ -424,6 +456,10 @@ export default {
     this.popWindows = {}
     this.activateSeq = 0
     this.resizeDrag = null
+    // A directory handle is not data to render, and making one reactive would
+    // hand Vue a proxy where the File System Access API expects the handle.
+    this.snapshotDir = null
+    this.snapCueSeq = 0
   },
   mounted () {
     this.player = new BvrPlayer({
@@ -471,6 +507,7 @@ export default {
     // The dock stacks exist from here on, so a Teleport may safely look for one.
     this.mounted = true
     this.consumeLaunchFiles()
+    this.restoreSnapshotFolder()
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.onKeyDown)
@@ -872,6 +909,90 @@ export default {
       if (Object.keys(this.popTargets).length) this.popTargets = {}
     },
 
+    // ------------------------------------------------------------ snapshots
+    /**
+     * Saves the frame on screen as an image file.
+     *
+     * The picture is taken synchronously, before anything is awaited: whatever
+     * follows -- a permission prompt, the encoder, the write -- happens to a
+     * copy of the frame that was on screen at the moment of the click, which is
+     * the frame the viewer meant. Nothing here serialises, so a rapid burst
+     * produces one still per press rather than one per encode.
+     */
+    async saveSnapshot () {
+      if (this.state.status !== 'ready') return
+      const canvas = this.player.snapshotCanvas()
+      if (!canvas) {
+        this.showNotice('There is no frame on screen to save yet.')
+        return
+      }
+      const context = this.player.snapshotContext()
+      this.flashSnapshot()
+      try {
+        // Resolved before encoding so that a permission prompt still has the
+        // user activation from the click that asked for the snapshot.
+        const dir = await this.snapshotDirectory()
+        const encoded = await encodeSnapshot(canvas, {
+          format: this.settings.snapshotFormat,
+          quality: this.settings.snapshotQuality
+        })
+        if (!encoded) throw new Error('the image could not be encoded')
+        const name = snapshotName(context, encoded.ext)
+        if (dir) await writeFileTo(dir, name, encoded.blob)
+        else downloadSnapshot(encoded.blob, name)
+      } catch (e) {
+        const why = e && e.message ? e.message : String(e)
+        this.showNotice(`The snapshot could not be saved: ${why}`)
+      }
+    },
+    /** A cue per still, each with a life of its own. */
+    flashSnapshot () {
+      const id = ++this.snapCueSeq
+      this.snapCues = [...this.snapCues, id]
+      setTimeout(() => {
+        this.snapCues = this.snapCues.filter((x) => x !== id)
+      }, SNAP_CUE_MS)
+    },
+    /**
+     * The folder a still should be written into, or null to download it.
+     *
+     * Browsing a folder only asks for read access, so the first snapshot written
+     * into one has to ask for write access as well. A refusal is not a failure:
+     * the still still gets saved, by the route that needs no permission at all.
+     */
+    async snapshotDirectory () {
+      if (!this.settings.snapshotToFolder || !canPickDirectory()) return null
+      const handle = this.snapshotDir || await loadDirectoryHandle()
+      if (!handle) return null
+      const granted = await directoryPermission(handle, true, 'readwrite')
+      if (granted !== 'granted') {
+        this.showNotice(`Write access to ${handle.name} was declined, so the snapshot was downloaded instead.`)
+        return null
+      }
+      this.setSnapshotFolder(handle)
+      return handle
+    },
+    /** Names the last-browsed folder in the settings panel, without prompting. */
+    async restoreSnapshotFolder () {
+      if (!canPickDirectory()) return
+      const handle = await loadDirectoryHandle()
+      if (!handle || this.snapshotDir) return
+      this.setSnapshotFolder(handle)
+    },
+    onFolderOpened (handle) {
+      this.setSnapshotFolder(handle)
+    },
+    /**
+     * A directory handle is not required to have a name -- the origin-private
+     * file system's root has none -- so whether there is a folder and what to
+     * call it are two separate facts.
+     */
+    setSnapshotFolder (handle) {
+      this.snapshotDir = handle || null
+      this.snapshotFolderReady = !!handle
+      this.snapshotFolderName = (handle && handle.name) || (handle ? 'the open folder' : '')
+    },
+
     // ----------------------------------------------------------------- misc
     metadataAt (ms) {
       return this.player ? this.player.metadataAt(ms) : Promise.resolve(null)
@@ -1063,6 +1184,11 @@ export default {
         case 'e':
         case 'E':
           this.togglePanel('export'); break
+        case 's':
+        case 'S':
+          // Auto-repeat would write a file every frame the key is held.
+          if (!event.repeat) this.saveSnapshot()
+          break
         case '[':
           this.stepRate(-1); break
         case ']':

@@ -152,7 +152,7 @@ export default {
     sort: { type: String, default: 'time-desc' },
     currentName: { type: String, default: '' }
   },
-  emits: ['close', 'open', 'patch', 'notice'],
+  emits: ['close', 'open', 'patch', 'notice', 'folder'],
   data () {
     return {
       entries: [],
@@ -185,6 +185,14 @@ export default {
       const groups = groupByDay(sorted)
       if (this.sort === 'time-asc') groups.reverse()
       return groups
+    }
+  },
+  watch: {
+    // The app writes snapshots into whichever folder is open, so it has to be
+    // told when that changes -- including on the first restore, before anyone
+    // has clicked anything.
+    dirHandle (handle) {
+      this.$emit('folder', handle || null)
     }
   },
   created () {

@@ -101,13 +101,54 @@ export async function openEntry (entry) {
  * not, and re-requesting needs a user gesture -- so the caller has to know which
  * of the two situations it is in before it can do the right thing.
  */
-export async function directoryPermission (handle, request = false) {
+export async function directoryPermission (handle, request = false, mode = 'read') {
   if (!handle || typeof handle.queryPermission !== 'function') return 'granted'
   try {
-    const state = await handle.queryPermission({ mode: 'read' })
+    const state = await handle.queryPermission({ mode })
     if (state === 'granted' || !request) return state
-    return await handle.requestPermission({ mode: 'read' })
+    return await handle.requestPermission({ mode })
   } catch {
     return 'denied'
   }
+}
+
+/**
+ * A name nothing in `dir` is using yet.
+ *
+ * `getFileHandle(name, { create: true })` would happily write over whatever is
+ * already there, and silently destroying a file is not something a snapshot
+ * button should be capable of. Anything other than "no such file" is treated as
+ * "taken" rather than investigated -- the next candidate costs nothing.
+ */
+async function unusedName (dir, name) {
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  for (let n = 1; n <= 200; n++) {
+    const candidate = n === 1 ? name : `${stem}-${n}${ext}`
+    try {
+      await dir.getFileHandle(candidate)
+    } catch (e) {
+      if (e && e.name === 'NotFoundError') return candidate
+    }
+  }
+  return `${stem}-${Date.now()}${ext}`
+}
+
+/**
+ * Writes one file into a directory the user has granted write access to, and
+ * returns the name it ended up with.
+ */
+export async function writeFileTo (dir, name, blob) {
+  const finalName = await unusedName(dir, name)
+  const handle = await dir.getFileHandle(finalName, { create: true })
+  const writable = await handle.createWritable()
+  try {
+    await writable.write(blob)
+    await writable.close()
+  } catch (e) {
+    try { await writable.abort() } catch { /* already closed */ }
+    throw e
+  }
+  return finalName
 }

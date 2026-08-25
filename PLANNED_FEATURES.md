@@ -184,16 +184,52 @@ consequence of their having been overlays.
   Indexing stays on the main thread: it already yields to the event loop often
   enough to keep the progress bar painting, and it is bounded by read throughput
   rather than by computation, so a worker would buy little.
-- **Matched stream shapes — done.** A file with two streams whose aspect ratios
-  disagree now shows both in the shape of the highest-resolution one, which is
-  the stream carrying the camera's real field of view. It is the renderer's
-  destination rectangle that changes, so overlays stay registered with the
-  picture and the current frame is simply re-presented when the setting is
-  toggled. The short axis is stretched rather than the long one cropped: nothing
-  the recording contains is discarded, and a squeezed sub stream is what the
-  stretch undoes. Streams within 1% of each other are left alone -- encoders
-  round to macroblocks, and re-shaping a picture that is already right only costs
-  sharpness.
+- **Matched stream shapes — done, then corrected.** The first version compared
+  the two streams' *declared* resolutions and rescaled the odd one out. That was
+  the wrong comparison, and on real files it did nothing at all: Blue Iris writes
+  down the resolution it asked the camera for, and cameras hand back something
+  else. Two samples in hand declare 1600x1200 + 640x480 and 2688x1520 + 848x480 --
+  declared shapes agreeing to within a fraction of a percent -- while both sub
+  streams actually arrive encoded 704x480. The setting reported "both streams are
+  already the same shape" over a visibly stretched picture.
+
+  The reference is now the header's main-stream resolution outright, and the real
+  encoded size is read out of the H.264 / H.265 SPS (and a JPEG's SOF marker) so
+  that the two can be told apart at all. Any frame that decodes to a different
+  shape is put back into the declared one; frames that already agree are
+  untouched, which is decided per frame, as a switching-mode file interleaving
+  two shapes needs. It is the renderer's destination rectangle that changes, so
+  overlays stay registered with the picture and the current frame is simply
+  re-presented when the setting is toggled. The short axis is stretched rather
+  than the long one cropped: nothing the recording contains is discarded. A
+  percent of slack absorbs macroblock rounding, since re-shaping a picture that
+  is already right only costs sharpness.
+
+  Reading the SPS pays for itself elsewhere: the stream picker, the metadata
+  panel and the MP4 track header an export writes now all carry the size the
+  pictures really are, with the declared size shown alongside where they differ.
+
+- **Snapshots — done.** The camera button, or `S`, saves the frame on screen.
+  The picture is taken synchronously before anything is awaited, so what is saved
+  is the frame that was on screen when the button was pressed however long the
+  encode and the write take afterwards, and nothing serialises, so a rapid burst
+  is one still per press. The whole picture is written -- aspect corrected,
+  rotated, overlaid -- without the letterbox bars or the digital-zoom crop, which
+  belong to the viewport rather than to the recording. Overlay line and glyph
+  sizes are taken from the on-screen fit rather than from the still's own pixel
+  count, so a saved frame looks like the one that was being looked at instead of
+  carrying hairlines across 2688 pixels.
+
+  JPEG at 85% is the default; WebP is offered where the canvas can encode it
+  (feature-tested on one pixel, because a canvas asked for a format it lacks
+  quietly writes PNG instead). Stills download by default, or go straight into
+  the folder the browser has open -- which needs write permission on top of the
+  read grant browsing asked for, so it is opt-in, and it never overwrites.
+
+  The cue is one element per still, each running its own animation and discarded
+  when it finishes. Sharing one element would mean restarting an animation
+  mid-flight, and a burst would read as a single long flash rather than as one
+  cue per still.
 
 - **Very large files — not done, deliberately.** The design still scans the whole
   file once on open. Making the index sparse and seeking by the spec's

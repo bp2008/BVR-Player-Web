@@ -700,6 +700,76 @@ body {
   transform: translate(-50%, -50%) scale(1.05);
 }
 
+/* ----------------------------------------------------------- snapshot cue */
+
+/* Confirmation that a still was taken, over the picture it was taken from.
+   Deliberately brief: at roughly half a second a burst of snapshots reads as a
+   burst, each cue starting bright while the one before it is still fading, so
+   the viewer can count them. */
+
+.snapcues {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.snapcue {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* The shutter flash. Peaks well below white so that overlapping cues brighten
+   rather than saturate. */
+.snapcue::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  animation: snapcue-flash 300ms ease-out both;
+}
+
+.snapcue__badge {
+  position: relative;
+  padding: 14px;
+  border-radius: 50%;
+  background: rgba(8, 11, 16, 0.66);
+  color: #fff;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+  animation: snapcue-badge 460ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
+}
+
+@keyframes snapcue-flash {
+  0% { opacity: 0; }
+  10% { opacity: 0.5; }
+  100% { opacity: 0; }
+}
+
+@keyframes snapcue-badge {
+  0% { opacity: 0; transform: scale(0.55); }
+  20% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.35); }
+}
+
+/* Reduced motion still needs the confirmation, just not the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .snapcue::before {
+    animation-duration: 220ms;
+  }
+
+  .snapcue__badge {
+    animation: snapcue-badge-still 420ms ease-out both;
+  }
+
+  @keyframes snapcue-badge-still {
+    0% { opacity: 0; }
+    20% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+}
+
 /* ------------------------------------------------------------ drag overlay */
 
 .dragmask {

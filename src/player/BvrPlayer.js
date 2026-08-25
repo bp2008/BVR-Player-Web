@@ -51,10 +51,18 @@ export function createBlankState () {
     hasSubStream: false,
     hasMainStream: false,
     switchingMode: false,
+    // The size each stream's pictures actually are, read from the bitstream.
     mainWidth: 0,
     mainHeight: 0,
     subWidth: 0,
     subHeight: 0,
+    // The size the file header says they are -- what Blue Iris asked the camera
+    // for. Kept apart because the two disagree often, and the difference is what
+    // the aspect correction is built on.
+    mainDeclaredWidth: 0,
+    mainDeclaredHeight: 0,
+    subDeclaredWidth: 0,
+    subDeclaredHeight: 0,
     startUtc: 0,
     currentUtc: 0,
     truncated: false,
@@ -67,9 +75,14 @@ export function createBlankState () {
     codecWarning: '',
     error: '',
 
-    // Non-zero when the streams disagree about shape and the smaller one is
-    // being stretched to match the larger (see _targetAspect).
+    // The shape every frame is put into, from the header's main-stream
+    // resolution; 0 when the correction is off (see _targetAspect).
     displayAspect: 0,
+    // The size the stream on screen is actually being drawn at. Equal to
+    // width/height when the pictures already have the reference shape, which is
+    // how the UI knows whether anything is being rescaled at all.
+    displayWidth: 0,
+    displayHeight: 0,
 
     // Digital zoom, driven from outside by the ViewController.
     zoom: 1,
@@ -210,13 +223,13 @@ export class BvrPlayer {
         fileSizeBytes: file.size,
         zoom: 1,
         zoomed: false,
+        // Stream presence comes from the finished index rather than the probe:
+        // a stream whose frames start late in the file is real even though the
+        // opening probe never reached it. The sizes _emitProbe published are
+        // the bitstream's own and are left alone.
         hasMainStream: this.index.streams[0].count > 0,
         hasSubStream: this.index.streams[1].count > 0,
-        switchingMode: this.index.switchingMode,
-        mainWidth: this.header.bmih[0]?.width || 0,
-        mainHeight: this.header.bmih[0]?.height || 0,
-        subWidth: this.header.bmih[1]?.width || 0,
-        subHeight: this.header.bmih[1]?.height || 0
+        switchingMode: this.index.switchingMode
       })
 
       this._start()
@@ -238,7 +251,7 @@ export class BvrPlayer {
     const effective = resolveStreamMode(this.index, playable, mode)
     this.streamMode = effective
 
-    const pstream = buildPlaybackStream(this.index, this.header, effective, playable)
+    const pstream = buildPlaybackStream(this.index, this.header, effective, playable, this._probedSizes())
     if (pstream.count === 0) throw new Error('The selected stream contains no frames.')
 
     const codecInfo = this._codecFor(pstream)
@@ -274,6 +287,9 @@ export class BvrPlayer {
       marks,
       segments
     })
+    // The reference shape does not change with the stream, but whether *this*
+    // stream is being rescaled to reach it does.
+    this._applyDisplayAspect()
 
     // On open the codec warning already explains this; only an explicit switch
     // that could not be honoured needs saying out loud.
@@ -304,37 +320,55 @@ export class BvrPlayer {
   _applyDisplayAspect () {
     const aspect = this._targetAspect()
     this.renderer.setDisplayAspect(aspect)
-    this._emit({ displayAspect: aspect })
+    const shown = this.renderer.presentedSize(this._state.width, this._state.height)
+    this._emit({ displayAspect: aspect, displayWidth: shown.width, displayHeight: shown.height })
   }
 
   /**
    * The aspect ratio every frame should be shown in, or 0 to leave frames as
    * they decoded.
    *
-   * Only a file with two present streams that disagree about shape gets one: the
-   * highest-resolution stream is the one carrying the camera's real field of
-   * view, so its ratio is the truth and the other stream is the one that was
-   * squeezed to fit a smaller encoder. A single-stream recording has nothing to
-   * disagree with and is always left alone.
+   * The reference is the resolution Blue Iris recorded for the *main* stream in
+   * the file header, not the resolution either encoder actually produced. That
+   * distinction is the whole point: Blue Iris writes down the picture it asked
+   * the camera for, and cameras routinely hand back something else. Real files
+   * in hand have a sub stream declared 640x480 and encoded 704x480, and another
+   * declared 848x480 and encoded 704x480 -- in both, the two streams' *declared*
+   * shapes agree to within a fraction of a percent while the pictures that
+   * arrive are visibly different shapes. Comparing declared against declared, as
+   * this used to, concluded there was nothing to fix and left the sub stream
+   * stretched sideways.
+   *
+   * So the header's main-stream shape is taken as the truth -- it is the field
+   * of view the recording claims, and the one the main stream is very nearly
+   * always encoded in anyway -- and any frame that decodes to a different shape
+   * is put back into it. Frames that already agree are untouched, so a file
+   * whose encoders did what they were told sees no change at all; the renderer
+   * decides that per frame, which is what a switching-mode file interleaving two
+   * differently shaped streams needs.
+   *
+   * Spec 4.3: a sub-only recording carries no second BITMAPINFOHEADER and
+   * readers treat the first as describing the stream they have, so bmih[0] is
+   * the right reference whichever streams the file turns out to hold.
    */
   _targetAspect () {
     if (!this.matchAspect || !this.header) return 0
-    const dims = []
-    for (let si = 0; si < 2; si++) {
-      if (this.index && this.index.streams[si].count === 0) continue
-      const probed = this.probe && this.probe.streams[si]
-      const bmih = this.header.bmih[si]
-      const w = (probed && probed.width) || (bmih && bmih.width) || 0
-      const h = (probed && probed.height) || (bmih && bmih.height) || 0
-      if (w > 0 && h > 0) dims.push({ w, h, px: w * h })
+    for (const bmih of [this.header.bmih[0], this.header.bmih[1]]) {
+      const w = bmih ? bmih.width : 0
+      const h = bmih ? bmih.height : 0
+      if (w <= 0 || h <= 0) continue
+      const ratio = w / h
+      // A header carrying a nonsense resolution is worse than no reference.
+      if (ratio < 0.2 || ratio > 5) continue
+      return ratio
     }
-    if (dims.length < 2) return 0
-    dims.sort((a, b) => b.px - a.px)
-    const target = dims[0].w / dims[0].h
-    const other = dims[1].w / dims[1].h
-    // Two streams of the same shape need no correction, whatever their sizes.
-    if (Math.abs(target - other) <= target * 0.01) return 0
-    return target
+    return 0
+  }
+
+  /** Each stream's real picture size, as the probe read it out of the bitstream. */
+  _probedSizes () {
+    if (!this.probe) return null
+    return this.probe.streams.map((s) => (s ? { width: s.width, height: s.height } : null))
   }
 
   /** Whether a source stream may be fed to the decoder; unprobed means "try it". */
@@ -382,6 +416,10 @@ export class BvrPlayer {
       mainHeight: main ? main.height : (this.header.bmih[0]?.height || 0),
       subWidth: sub ? sub.width : (this.header.bmih[1]?.width || 0),
       subHeight: sub ? sub.height : (this.header.bmih[1]?.height || 0),
+      mainDeclaredWidth: this.header.bmih[0]?.width || 0,
+      mainDeclaredHeight: this.header.bmih[0]?.height || 0,
+      subDeclaredWidth: this.header.bmih[1]?.width || this.header.bmih[0]?.width || 0,
+      subDeclaredHeight: this.header.bmih[1]?.height || this.header.bmih[0]?.height || 0,
       mainCodecLabel: main ? main.codec.label : '',
       subCodecLabel: sub ? sub.codec.label : '',
       mainFourcc: main ? main.fourcc : '',
@@ -677,6 +715,36 @@ export class BvrPlayer {
   /** Publishes the view state the UI shows, after the ViewController moved it. */
   notifyView () {
     this._emit({ zoom: this.renderer.view.zoom, zoomed: this.renderer.zoomed })
+  }
+
+  /**
+   * The frame on screen, drawn into a canvas of its own.
+   *
+   * The pipeline's copy is preferred over whatever the renderer last drew: a
+   * VideoFrame the decoder has since recycled cannot be drawn from again, and
+   * asking for it by index is the same lookup a repaint does. Returns null when
+   * there is no picture to save, which the caller reports rather than throws.
+   */
+  snapshotCanvas () {
+    let frame = null
+    if (this.curIdx >= 0 && this.video) frame = this.video.get(this.curIdx)
+    try {
+      return this.renderer.snapshot(frame || undefined)
+    } catch {
+      return null
+    }
+  }
+
+  /** What a saved still should be named after: the clip, and where in it. */
+  snapshotContext () {
+    const s = this.pstream
+    const idx = this.curIdx >= 0 ? this.curIdx : 0
+    return {
+      fileName: this._state.fileName,
+      frameIndex: idx,
+      timeMs: s ? s.ts[idx] : this._state.currentTime,
+      utcMs: s && s.utc ? s.utc[idx] : 0
+    }
   }
 
   /**

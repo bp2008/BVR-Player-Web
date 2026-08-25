@@ -41,13 +41,12 @@
 
         <h3 class="metasec__h">Streams</h3>
         <dl class="kv">
-          <div v-if="state.hasMainStream">
-            <dt>Main</dt>
-            <dd>{{ state.mainWidth }}&times;{{ state.mainHeight }} &middot; {{ state.mainCodecLabel }}</dd>
-          </div>
-          <div v-if="state.hasSubStream">
-            <dt>Sub</dt>
-            <dd>{{ state.subWidth }}&times;{{ state.subHeight }} &middot; {{ state.subCodecLabel }}</dd>
+          <div v-for="s in streams" :key="s.name">
+            <dt>{{ s.name }}</dt>
+            <dd>
+              {{ s.encoded }} &middot; {{ s.codec }}
+              <em v-if="s.declared" class="kv__aside">header declares {{ s.declared }}</em>
+            </dd>
           </div>
           <div v-if="state.switchingMode"><dt>Mode</dt><dd>switching (main when triggered)</dd></div>
           <div><dt>Audio</dt><dd>{{ state.hasAudio ? state.audioLabel : 'none' }}</dd></div>
@@ -241,16 +240,33 @@ export default {
      * Renderer._effective -- the short axis grows, so nothing is cropped.
      */
     shownAs () {
-      const ar = this.state.displayAspect
-      const w = this.state.width
-      const h = this.state.height
-      if (!ar || !w || !h) return ''
-      const native = w / h
-      if (Math.abs(native - ar) <= ar * 0.01) return ''
-      const out = native < ar
-        ? { w: Math.round(h * ar), h }
-        : { w, h: Math.round(w / ar) }
-      return `${out.w} × ${out.h}, rescaled to match`
+      const s = this.state
+      if (!s.displayWidth || !s.displayHeight) return ''
+      if (s.displayWidth === s.width && s.displayHeight === s.height) return ''
+      return `${s.displayWidth} × ${s.displayHeight}, rescaled to the declared shape`
+    },
+    /**
+     * Each stream as it really is, with the header's own numbers alongside when
+     * they disagree. A Blue Iris sub stream declared 848x480 and encoded 704x480
+     * is ordinary, and seeing both is the only way to tell why the picture is
+     * being corrected.
+     */
+    streams () {
+      const s = this.state
+      const rows = []
+      const add = (name, w, h, dw, dh, codec) => {
+        const declared = (dw > 0 && dh > 0 && (dw !== w || dh !== h))
+          ? `${dw}×${dh}`
+          : ''
+        rows.push({ name, encoded: `${w}×${h}`, declared, codec })
+      }
+      if (s.hasMainStream) {
+        add('Main', s.mainWidth, s.mainHeight, s.mainDeclaredWidth, s.mainDeclaredHeight, s.mainCodecLabel)
+      }
+      if (s.hasSubStream) {
+        add('Sub', s.subWidth, s.subHeight, s.subDeclaredWidth, s.subDeclaredHeight, s.subCodecLabel)
+      }
+      return rows
     },
     orientation () {
       if (!this.header) return ''
@@ -520,6 +536,15 @@ export default {
 
 .kv--warn {
   color: var(--warn);
+}
+
+/* A second, quieter fact about the same row -- the header's declared size next
+   to the size the pictures really are. */
+.kv__aside {
+  display: block;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: normal;
 }
 
 .metapanel__mask {

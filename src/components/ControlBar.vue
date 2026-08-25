@@ -118,6 +118,16 @@
       />
 
       <button
+        type="button"
+        class="ctl-btn"
+        title="Save this frame as an image (S)"
+        aria-label="Save this frame as an image"
+        @click="$emit('snapshot')"
+      >
+        <AppIcon name="photoCamera" :size="20" />
+      </button>
+
+      <button
         v-for="b in panelButtons"
         :key="b.id"
         type="button"
@@ -169,7 +179,7 @@ export default {
   emits: [
     'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume', 'toggle-mute',
     'toggle-fullscreen', 'stream', 'menu-open', 'rate', 'reset-zoom',
-    'toggle-panel', 'trim'
+    'toggle-panel', 'trim', 'snapshot'
   ],
   data () {
     return { openMenus: { stream: false, rate: false } }

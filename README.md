@@ -29,6 +29,7 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Fullscreen | ⛶ button, or double-click the video | <kbd>F</kbd> |
 | Open a file | Open button | <kbd>O</kbd> |
 | Browse a folder | Browse button | <kbd>L</kbd> |
+| Save a snapshot | camera button | <kbd>S</kbd> |
 | Metadata inspector | layers button | <kbd>I</kbd> |
 | Export to MP4 | download button | <kbd>E</kbd> |
 | Settings | gear button | |
@@ -62,14 +63,44 @@ never hidden behind a panel.
   back with the button in its place. Useful on a second monitor, and the panel
   keeps working exactly as it did while docked.
 
-### Two streams of different shapes
+### Streams of the wrong shape
 
-Blue Iris records a sub stream whose aspect ratio does not always match the main
-stream's — 1920×1080 alongside a 640×480 is ordinary output. In switching mode
-the two arrive interleaved, so the picture would otherwise change shape
-mid-playback. By default the smaller stream is stretched to the shape of the
-highest-resolution one, which is where the camera's real field of view is
-recorded; the setting can be turned off to see each stream exactly as encoded.
+Blue Iris writes into every recording the resolution it asked each camera for.
+Cameras do not always oblige. A sub stream declared 640×480 arriving encoded
+704×480, or one declared 848×480 arriving encoded 704×480, is ordinary output —
+and either way the picture on screen is stretched sideways, changing shape
+mid-playback in switching mode, where the two streams arrive interleaved.
+
+**Match declared shape** (on by default) takes the header's main-stream
+resolution as the truth — it is the field of view the recording claims — and puts
+any frame that decodes to a different shape back into it. Frames that already
+agree are left alone, so a recording whose encoders did what they were told is
+untouched. The short axis is stretched rather than the long one cropped, so
+nothing the recording contains is discarded. Turn it off to see every stream
+exactly as encoded.
+
+The settings panel names both numbers for the file that is open, and the metadata
+panel lists each stream's real size with the header's declared size beside it
+where the two differ — so it is always visible whether a picture is being
+corrected, and by how much.
+
+### Snapshots
+
+The camera button, or <kbd>S</kbd>, saves the frame on screen as an image. The
+whole picture is saved, aspect-corrected, rotated and with overlays exactly as
+shown — without the letterboxing, and without the digital-zoom crop, so a
+snapshot taken while zoomed in still holds every pixel the recording has.
+
+Files are named after the recording and the frame's own UTC, to the millisecond:
+`hillsidedrivet.20260824_203945.310Z.jpg`. The format is JPEG at 85% quality by
+default; both the format (WebP is offered where the browser can encode it) and
+the quality are in the settings panel.
+
+Stills download as ordinary files. **Save into the open folder** writes them
+straight into the folder **Browse** has open instead, which avoids the browser's
+downloads bar popping up over the video on every save. It needs write permission
+on that folder, asked for once, and it never overwrites: a name already in use
+gains a `-2`.
 
 ### Browsing a folder
 
