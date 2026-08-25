@@ -228,6 +228,7 @@
             :duration="state.duration"
             @close="closePanel('export')"
             @trim="onTrim"
+            @seek="onExportSeek"
             @notice="showNotice"
           />
         </PanelFrame>
@@ -287,6 +288,7 @@ import { loadDirectoryHandle } from './library/thumbCache.js'
 import { downloadSnapshot, encodeSnapshot, snapshotName } from './player/snapshot.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { formatBytes } from './util/format.js'
+import { acceptsTypedText, isSpaceKey } from './util/keys.js'
 import { PANELS, panelDef } from './panels/panels.js'
 import { solveDocks, maxExpanded, MIN_DOCK, MAX_DOCK } from './panels/layout.js'
 import { openPanelWindow, closePanelWindow } from './panels/popout.js'
@@ -438,6 +440,12 @@ export default {
     'settings.matchAspect' (on) {
       if (this.player) this.player.setMatchAspect(on)
     },
+    'settings.scrubExact' (on) {
+      if (this.player) this.player.scrubExact = on
+    },
+    'settings.pauseWhileSeeking' (on) {
+      if (this.player) this.player.pauseWhileSeeking = on
+    },
     // Docks change how much room the video has, so the canvas has to be
     // re-measured whenever one appears, moves or is resized. The computed hands
     // back a fresh object every time it re-runs, so no deep comparison is needed
@@ -470,6 +478,8 @@ export default {
     })
     this.player.streamMode = this.settings.streamMode
     this.player.matchAspect = this.settings.matchAspect
+    this.player.scrubExact = this.settings.scrubExact
+    this.player.pauseWhileSeeking = this.settings.pauseWhileSeeking
     this.player.setVolume(this.settings.volume)
     if (this.settings.muted) this.player.toggleMute()
     this.player.setOverlay({
@@ -500,6 +510,7 @@ export default {
     this.measureBody(this.$refs.body.getBoundingClientRect())
     this.player.onResize()
 
+    window.addEventListener('keydown', this.onSpaceKey, true)
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('beforeunload', this.closeAllPopouts)
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
@@ -510,6 +521,7 @@ export default {
     this.restoreSnapshotFolder()
   },
   beforeUnmount () {
+    window.removeEventListener('keydown', this.onSpaceKey, true)
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('beforeunload', this.closeAllPopouts)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
@@ -1017,6 +1029,17 @@ export default {
         end: Math.max(0, Math.min(range.end, this.state.duration))
       }
     },
+    /**
+     * A time typed into the export range.
+     *
+     * Stop and show that exact frame: typing one of these is how a moment is
+     * picked in a recording too long for the scrub bar to resolve, so the point
+     * of it is to see precisely what was chosen.
+     */
+    onExportSeek (ms) {
+      this.player.pause()
+      this.player.seek(ms, { preview: false })
+    },
 
     // -------------------------------------------------------------- settings
     patchSettings (patch) {
@@ -1120,6 +1143,34 @@ export default {
     },
 
     // -------------------------------------------------------------- keyboard
+
+    /**
+     * Space is the player's, wherever focus happens to be.
+     *
+     * A control keeps focus after it is clicked, and a browser treats Space on a
+     * focused button, checkbox or radio as a second click on it -- so opening a
+     * panel and then reaching for the space bar closed the panel again instead
+     * of pausing. This runs in the capture phase because those controls either
+     * act on the key natively or stop it before it ever reaches the window, and
+     * it takes the key away from both. Nothing is lost by it: everything Space
+     * used to activate is activated by Enter as well.
+     *
+     * The one exception is a field you type into, where a space is a space.
+     */
+    onSpaceKey (event) {
+      if (!isSpaceKey(event)) return
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (acceptsTypedText(event.target)) return
+      this.keyboardNav = true
+      // Both the page scroll and the focused control's own activation.
+      event.preventDefault()
+      event.stopPropagation()
+      // Deliberately still play/pause with the folder browser up: opening it
+      // does not stop the recording, so the space bar is how it is silenced.
+      this.togglePlay()
+      this.wakeUi()
+    },
+
     onKeyDown (event) {
       // Any key counts as keyboard navigation, Tab included - that is the one
       // that parks focus on a control the chrome must then keep on screen.
@@ -1127,10 +1178,10 @@ export default {
 
       const el = event.target
       if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
-      // A clicked button keeps focus, and the browser activates it on Space or
-      // Enter. Handling those here too would fire the action twice - which reads
-      // as the control doing nothing at all.
-      if (el && el.tagName === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) return
+      // A clicked button keeps focus and the browser activates it on Enter.
+      // Handling that here too would fire the action twice - which reads as the
+      // control doing nothing at all. Space never arrives: see onSpaceKey.
+      if (el && el.tagName === 'BUTTON' && event.key === 'Enter') return
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
       // The folder browser covers the whole window; only its own Escape applies.
@@ -1142,7 +1193,6 @@ export default {
       const skip = this.settings.skipSeconds
       let handled = true
       switch (event.key) {
-        case ' ':
         case 'k':
         case 'K':
           this.togglePlay(); break

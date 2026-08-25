@@ -137,6 +137,11 @@ export default {
       event.preventDefault()
       this.$refs.track.setPointerCapture(event.pointerId)
       this.handle = which
+      // A handle drag is a scrub like any other: the playhead follows it, so the
+      // picture shows what is actually being trimmed to instead of leaving the
+      // choice to be made blind.
+      this.$emit('scrubbing', true)
+      this.moveHandle(this.ratioAt(event))
     },
     onDown (event) {
       if (!this.duration) return
@@ -159,16 +164,20 @@ export default {
       const at = ratio * this.duration
       // The two handles cannot cross; each stops a moment short of the other.
       const gap = Math.min(500, this.duration / 50)
-      if (this.handle === 'in') {
-        this.$emit('trim', { start: Math.min(at, this.trim.end - gap), end: this.trim.end })
-      } else {
-        this.$emit('trim', { start: this.trim.start, end: Math.max(at, this.trim.start + gap) })
-      }
+      const next = this.handle === 'in'
+        ? { start: Math.min(at, this.trim.end - gap), end: this.trim.end }
+        : { start: this.trim.start, end: Math.max(at, this.trim.start + gap) }
+      this.$emit('trim', next)
+      // Where the handle landed rather than where the pointer is, so the frame
+      // on screen still matches the marker once the two ends start pushing each
+      // other along.
+      this.$emit('seek', this.handle === 'in' ? next.start : next.end, true)
     },
     onUp (event) {
       if (this.handle) {
         this.handle = null
         try { this.$refs.track.releasePointerCapture(event.pointerId) } catch { /* pointer already gone */ }
+        this.$emit('scrubbing', false)
         return
       }
       if (!this.dragging) return

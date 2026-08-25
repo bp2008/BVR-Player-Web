@@ -20,6 +20,25 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 export const PLAYBACK_RATES = [0.25, 0.5, 1, 1.5, 2, 4, 8]
 
 /**
+ * How long a scrub frame may be in flight before the viewer is told about it.
+ *
+ * A drag renders at whatever rate the decoder can keep up with, which on a long
+ * recording is a handful of frames a second; announcing each of those gaps as
+ * buffering makes ordinary scrubbing look like it is failing. Past this, the
+ * wait is long enough to be worth explaining.
+ */
+const SCRUB_BUSY_MS = 400
+
+/**
+ * ...and how long before a scrub frame that has not arrived is presumed stuck.
+ *
+ * A drag deliberately never cancels the picture it is waiting for, so a decode
+ * that will never produce one would otherwise freeze the drag outright. Well
+ * past any plausible key-frame decode, so this only ever fires on trouble.
+ */
+const SCRUB_STALL_MS = 1200
+
+/**
  * The complete shape of the state the player publishes.
  *
  * Exported so the Vue layer can seed itself from the same definition rather
@@ -141,8 +160,17 @@ export class BvrPlayer {
 
     this.curIdx = -1
     this.pendingSeek = null
-    this.scrubbing = false
     this.ended = false
+
+    // Scrubbing. `scrubTarget` is the position the pointer has reached while the
+    // picture for an earlier one is still being decoded; the two settings are
+    // written straight from the settings panel. See seek() and setScrubbing().
+    this.scrubbing = false
+    this.scrubTarget = null
+    this.scrubExact = false
+    this.pauseWhileSeeking = false
+    this._seekStartedAt = 0
+    this._resumeAfterScrub = false
     this.volume = 1
     this.muted = false
 
@@ -271,6 +299,8 @@ export class BvrPlayer {
     this.codecInfo = codecInfo
     this.frameIntervalMs = estimateFrameInterval(pstream, this.header.frameInterval)
     this.curIdx = -1
+    this.scrubTarget = null
+    this.video.setScrubbing(this.scrubbing)
     this.renderer.forget()
 
     const duration = pstream.ts[pstream.count - 1] + this.frameIntervalMs
@@ -561,6 +591,7 @@ export class BvrPlayer {
     this.blob = null
     this.curIdx = -1
     this.pendingSeek = null
+    this.scrubTarget = null
     this._metaAt = null
     this.clock.setWallSource(performanceWall)
     this.clock.pause()
@@ -628,31 +659,90 @@ export class BvrPlayer {
   }
 
   /**
-   * Seeks to a media time. `preview` decodes only the enclosing key frame, which
-   * is what keeps scrub-bar dragging responsive on long GOPs.
+   * Seeks to a media time.
+   *
+   * `preview` marks the scrub-bar path, where two things are true that are not
+   * true of any other seek. It settles for the key frame enclosing the target
+   * rather than the frame itself, which is one decode instead of a whole GOP of
+   * them -- unless the viewer has asked otherwise. And, while the pointer is
+   * still down, it will not interrupt a picture that is already on its way: a
+   * drag asks for new positions far faster than any decoder can answer, and
+   * restarting on each one meant a quick drag rendered nothing whatsoever. A
+   * request that arrives mid-decode is remembered instead and issued the moment
+   * that picture lands, so what the viewer sees is every few frames of what they
+   * dragged past rather than none of it. Media time still follows the pointer
+   * exactly; only the picture runs a beat behind.
    */
   seek (ms, { preview = false } = {}) {
     if (!this.pstream) return
     const s = this.pstream
     const t = clamp(ms, 0, Math.max(0, s.ts[s.count - 1]))
-    const exactIdx = frameIndexForTime(s, t)
-    const idx = preview ? Math.max(0, s.keyIdx[exactIdx]) : exactIdx
     this.clock.currentTime = t
     this.ended = false
-    this.pendingSeek = idx
-    this._applySeek()
     this._emit({ currentTime: t, ended: false })
+
+    if (preview && this.scrubbing && this.pendingSeek != null) {
+      this.scrubTarget = t
+      return
+    }
+    this.scrubTarget = null
+    this._startSeek(t, preview)
+  }
+
+  /** The half of seek() that actually moves the decoder. */
+  _startSeek (t, preview) {
+    const s = this.pstream
+    const exactIdx = frameIndexForTime(s, t)
+    const idx = preview && !this.scrubExact
+      ? Math.max(0, s.keyIdx[exactIdx])
+      : exactIdx
+    // Dragging across a long GOP asks for the same picture many times over;
+    // re-presenting it on each pointer move is a full canvas repaint for no
+    // change at all. Nothing is being waited for on this path, so the hold a
+    // previous wait may have left behind has to come off here.
+    if (idx === this.curIdx && this.pendingSeek == null && this.video && this.video.has(idx)) {
+      this.clock.setHeld(false)
+      return
+    }
+    this.pendingSeek = idx
+    this._seekStartedAt = performance.now()
+    this._applySeek()
   }
 
   skip (seconds) {
     this.seek(this.clock.currentTime + seconds * 1000)
   }
 
+  /**
+   * Enters or leaves a drag on the scrub bar.
+   *
+   * While the pointer is down the pipeline decodes no further than the frame
+   * being asked for and seek requests queue rather than cancel one another. On
+   * release the drag's last position is decoded exactly -- and there, cancelling
+   * whatever is still in flight for a position the pointer left long ago is
+   * exactly the right thing to do.
+   */
   setScrubbing (on) {
+    on = !!on
+    if (on === this.scrubbing) return
     this.scrubbing = on
-    if (!on && this.pstream) {
-      // Settle on the exact frame the user released over.
-      this.seek(this.clock.currentTime)
+    if (this.video) this.video.setScrubbing(on)
+
+    if (on) {
+      // Held playback would otherwise sound out a blip of audio between one seek
+      // and the next; some viewers navigate by those, so it is a preference.
+      this._resumeAfterScrub = this.pauseWhileSeeking && this.clock.playing
+      if (this._resumeAfterScrub) this.pause()
+      return
+    }
+
+    this.scrubTarget = null
+    if (this.pstream) this.seek(this.clock.currentTime)
+    if (this._resumeAfterScrub) {
+      this._resumeAfterScrub = false
+      // Resuming from the last moment of the clip would restart it from zero,
+      // which is not what letting go of the scrub bar at the end asked for.
+      if (this.clock.currentTime < this._state.duration - 1) this.play()
     }
   }
 
@@ -806,6 +896,14 @@ export class BvrPlayer {
     this._present(idx, frame)
     this.pendingSeek = null
     this.clock.setHeld(false)
+    // Wherever the drag got to while this picture was being decoded: its turn
+    // now. Nothing further can queue behind it until it too has been presented,
+    // so this recurses at most one level deep.
+    if (this.scrubTarget != null) {
+      const t = this.scrubTarget
+      this.scrubTarget = null
+      this._startSeek(t, true)
+    }
     return true
   }
 
@@ -844,7 +942,20 @@ export class BvrPlayer {
     if (this.pendingSeek != null) {
       if (!this._tryPresentPending()) {
         this.clock.setHeld(true)
-        if (!this._state.buffering) this._emit({ buffering: true })
+        const waited = performance.now() - this._seekStartedAt
+        if (!this._state.buffering && (!this.scrubbing || waited > SCRUB_BUSY_MS)) {
+          this._emit({ buffering: true })
+        }
+        // Nothing has come back for far longer than a key frame can take, so the
+        // picture being waited on is not coming. Rather than leave the drag
+        // frozen on one the pointer left seconds ago, let the newest position
+        // start over.
+        if (this.scrubTarget != null && waited > SCRUB_STALL_MS) {
+          const t = this.scrubTarget
+          this.scrubTarget = null
+          this.pendingSeek = null
+          this._startSeek(t, true)
+        }
         this.video.pump()
         return
       }

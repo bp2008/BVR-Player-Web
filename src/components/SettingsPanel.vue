@@ -62,6 +62,38 @@
       </span>
     </label>
 
+    <h3 class="spanel__h">Seeking</h3>
+
+    <label class="spanel__row spanel__row--toggle">
+      <span class="spanel__label">
+        Exact frame while scrubbing
+        <em class="spanel__sub">{{ scrubExactSummary }}</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.scrubExact"
+        @change="emitPatch({ scrubExact: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
+    </label>
+
+    <label class="spanel__row spanel__row--toggle">
+      <span class="spanel__label">
+        Pause while seeking
+        <em class="spanel__sub">Silences the blips of audio between seek steps</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.pauseWhileSeeking"
+        @change="emitPatch({ pauseWhileSeeking: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
+    </label>
+
     <h3 class="spanel__h">Picture</h3>
 
     <label v-if="showStreamPicker" class="spanel__row">
@@ -248,6 +280,12 @@ export default {
     return { rates: PLAYBACK_RATES }
   },
   computed: {
+    /** Says what the setting costs, in the terms that decide it. */
+    scrubExactSummary () {
+      return this.settings.scrubExact
+        ? 'Decodes every frame up to the pointer; slower the further apart key frames are'
+        : 'Shows the nearest key frame while dragging, which is quicker'
+    },
     overlaySummary () {
       const n = this.state.overlayObjects
       const boxes = this.state.overlayShapes

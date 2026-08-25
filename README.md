@@ -38,11 +38,25 @@ additionally need platform HEVC decode support (should work on most modern devic
 Double-clicking the video resets the zoom when zoomed in, and toggles fullscreen
 otherwise.
 
+<kbd>Space</kbd> always means play/pause, whatever has keyboard focus at the
+time — a button you clicked a moment ago does not get a second click out of it.
+Buttons, checkboxes and the rest are still activated from the keyboard with
+<kbd>Enter</kbd>. The exception is a field you type into, where a space is a
+space.
+
+Dragging the scrub bar shows the nearest key frame as you go, which is what lets
+a drag keep up on an hour-long recording; letting go settles on the exact frame
+under the pointer. Frames keep arriving for as long as you hold the pointer down
+— a picture already being decoded is never thrown away to chase a newer position,
+because seeing every few frames of what you dragged past beats seeing none of it.
+
 The skip interval (default 10 s), whether a recording starts playing when it is
 opened (it does), time display (elapsed or wall clock), loop, playback speed,
-overlay drawing, and — for dual-stream recordings — the main/sub stream selection
-and whether the two are shown in the same shape, all live in the settings panel
-and persist in the web browser's `localStorage`.
+overlay drawing, whether scrubbing decodes the exact frame rather than the
+nearest key frame, whether playback pauses while you seek, and — for dual-stream
+recordings — the main/sub stream selection and whether the two are shown in the
+same shape, all live in the settings panel and persist in the web browser's
+`localStorage`.
 
 ### Panels
 
@@ -143,6 +157,15 @@ ways:
   only begin on a key frame, so the panel says when the start has to shift.
 - **Re-encode** — decode and encode again, which trims exactly and can change
   codec, bitrate, resolution and frame rate.
+
+The range is set by dragging the handles on the scrub bar, by the **start here**
+and **end here** buttons, or by typing either timestamp into the panel. The
+playhead follows whichever you use — including a handle being dragged — so the
+frame you are cutting on is the frame on screen rather than a guess. Typing is
+the way to pick a precise moment in a long recording, where a scrub bar a few
+hundred pixels wide cannot resolve a particular second. Times are read as
+`m:ss.mmm`, and shorthands work too: `12` is twelve seconds, `90:00` is ninety
+minutes.
 
 Audio is always re-encoded to AAC: none of the formats BVR carries (FLAC, PCM,
 G.711 µ-law) has an MP4 form players can be relied on to handle. Where the

@@ -11,6 +11,29 @@ export function formatTime (ms, showMs = true) {
   return showMs ? `${head}:${pad(secs)}.${pad(millis, 3)}` : `${head}:${pad(secs)}`
 }
 
+/**
+ * Reads a media time typed by hand back into milliseconds, or null.
+ *
+ * It accepts everything formatTime writes -- `1:23`, `1:23.456`, `2:03:04.500`
+ * -- plus the shorthands anyone typing one reaches for anyway: a bare count of
+ * seconds, and a leading field that runs past its usual range, so `90:00` is
+ * ninety minutes. Null rather than zero for anything unreadable: a value being
+ * typed is unreadable for most of the keystrokes it takes to enter, and
+ * snapping the playhead to the start of the file on each of them would make the
+ * field unusable.
+ */
+export function parseTime (text) {
+  if (typeof text !== 'string') return null
+  const s = text.trim()
+  if (!/^\d{1,3}(:\d{1,2}){0,2}([.,]\d{1,3})?$/.test(s)) return null
+  const [whole, frac] = s.split(/[.,]/)
+  let ms = 0
+  for (const part of whole.split(':')) ms = ms * 60 + Number(part)
+  ms *= 1000
+  if (frac) ms += Number(frac.padEnd(3, '0'))
+  return ms
+}
+
 /** Formats a Unix-ms timestamp in the viewer's local time zone. */
 export function formatUtc (utcMs, showMs = true) {
   if (!utcMs) return ''

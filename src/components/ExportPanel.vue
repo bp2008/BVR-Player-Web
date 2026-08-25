@@ -31,16 +31,33 @@
     <div v-else class="export__body">
       <div class="export__field">
         <span class="export__label">Range</span>
-        <span class="export__value">
-          {{ formatTime(trim.start, false) }} &ndash; {{ formatTime(trim.end, false) }}
-          <em>({{ formatTime(Math.max(0, trim.end - trim.start), false) }})</em>
-        </span>
+        <div class="export__times">
+          <input
+            v-for="end in ENDS"
+            :key="end"
+            class="export__time"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            :aria-label="end === 'start' ? 'Range start' : 'Range end'"
+            :value="edit[end]"
+            @focus="editing = end"
+            @input="onTimeInput(end, $event)"
+            @change="onTimeCommit(end, $event)"
+            @blur="onTimeBlur"
+            @keydown.stop
+          />
+          <em class="export__len">{{ formatTime(Math.max(0, trim.end - trim.start), false) }}</em>
+        </div>
         <div class="export__range">
           <button type="button" class="btn btn--tiny" @click="setStart">Start here</button>
           <button type="button" class="btn btn--tiny" @click="setEnd">End here</button>
           <button type="button" class="btn btn--tiny" @click="resetRange">Whole clip</button>
         </div>
-        <p class="export__hint">Or drag the handles on the scrub bar.</p>
+        <p class="export__hint">
+          Type a time above, or drag the handles on the scrub bar. Either way the
+          playhead moves there, so you can see the frame you are cutting on.
+        </p>
       </div>
 
       <div class="export__field">
@@ -152,10 +169,17 @@
 
 <script>
 import AppIcon from './AppIcon.vue'
-import { formatBytes, formatTime } from '../util/format.js'
+import { formatBytes, formatTime, parseTime } from '../util/format.js'
 import { planExport, DEFAULT_OPTIONS, TRANSCODE_CODECS } from '../export/exportPlan.js'
 import { ExportJob, ExportCancelled } from '../export/exportJob.js'
 import { canStreamToDisk, deliver, openOutput } from '../export/sink.js'
+
+// The two ends of the range, in the order they are shown.
+const ENDS = ['start', 'end']
+
+// The shortest range the two ends may be pushed to. Long enough to hold a frame
+// at any sane rate, short enough that it never gets in the way of a real trim.
+const MIN_RANGE_MS = 100
 
 /**
  * Export to MP4, as a docked panel.
@@ -174,9 +198,15 @@ export default {
     currentTime: { type: Number, default: 0 },
     duration: { type: Number, default: 0 }
   },
-  emits: ['close', 'trim', 'notice'],
+  emits: ['close', 'trim', 'seek', 'notice'],
   data () {
     return {
+      ENDS,
+      // What the two range fields currently show. Held apart from `trim` so that
+      // a half-typed time is not rewritten under the cursor on every keystroke;
+      // see syncEdits.
+      edit: { start: '', end: '' },
+      editing: '',
       options: { ...DEFAULT_OPTIONS },
       running: false,
       progress: 0,
@@ -240,7 +270,8 @@ export default {
     context () {
       this.result = null
       if (this.plan && !this.plan.copyable) this.options = { ...this.options, mode: 'transcode' }
-    }
+    },
+    trim: { handler () { this.syncEdits() }, immediate: true }
   },
   mounted () {
     // A stream copy is the right default whenever it is possible; the plan
@@ -259,11 +290,60 @@ export default {
       return Math.min(hi, Math.max(lo, n))
     },
     patch (p) { this.options = { ...this.options, ...p } },
+
+    // ------------------------------------------------------------------ range
+
+    /** Re-writes the range fields from the trim, leaving the one being typed in. */
+    syncEdits () {
+      for (const end of ENDS) {
+        if (this.editing !== end) this.edit[end] = formatTime(this.trim[end])
+      }
+    },
+    /**
+     * Live as the time is typed, but only once it reads as one.
+     *
+     * The scrub bar is a few hundred pixels wide however long the recording is,
+     * so on anything lengthy it cannot resolve a particular second, let alone a
+     * particular frame. Typing the time is the way out of that -- and it is only
+     * useful if the picture follows along as it is typed, which is what the seek
+     * is for.
+     */
+    onTimeInput (which, event) {
+      this.edit[which] = event.target.value
+      const ms = parseTime(event.target.value)
+      if (ms !== null) this.applyTime(which, ms)
+    },
+    /** Enter, or leaving the field: whatever it holds now is the answer. */
+    onTimeCommit (which, event) {
+      const ms = parseTime(event.target.value)
+      if (ms === null) {
+        // Unreadable: put back the time that is actually in force.
+        this.edit[which] = formatTime(this.trim[which])
+        event.target.value = this.edit[which]
+        return
+      }
+      this.applyTime(which, ms)
+    },
+    onTimeBlur () {
+      this.editing = ''
+      this.syncEdits()
+    },
+    /** Moves one end of the range, and takes the playhead with it. */
+    applyTime (which, ms) {
+      const at = Math.min(Math.max(0, ms), this.duration)
+      const next = which === 'start'
+        ? { start: Math.min(at, this.trim.end - MIN_RANGE_MS), end: this.trim.end }
+        : { start: this.trim.start, end: Math.max(at, this.trim.start + MIN_RANGE_MS) }
+      next.start = Math.max(0, next.start)
+      next.end = Math.min(this.duration, next.end)
+      this.$emit('trim', next)
+      this.$emit('seek', next[which])
+    },
     setStart () {
-      this.$emit('trim', { start: Math.min(this.currentTime, this.trim.end - 100), end: this.trim.end })
+      this.$emit('trim', { start: Math.min(this.currentTime, this.trim.end - MIN_RANGE_MS), end: this.trim.end })
     },
     setEnd () {
-      this.$emit('trim', { start: this.trim.start, end: Math.max(this.currentTime, this.trim.start + 100) })
+      this.$emit('trim', { start: this.trim.start, end: Math.max(this.currentTime, this.trim.start + MIN_RANGE_MS) })
     },
     resetRange () { this.$emit('trim', { start: 0, end: this.duration }) },
     cancel () {
@@ -353,13 +433,44 @@ export default {
   font-weight: 400;
 }
 
-.export__value {
-  font-variant-numeric: tabular-nums;
+/* The two range fields plus the length they add up to, on one line. They share
+   the global field look but not its width: a timestamp with milliseconds is
+   wider than a number of seconds, and it is what has to fit. */
+.export__times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.export__value em {
+.export__time {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--field);
+  border: 1px solid var(--field-border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 4px 7px;
+  font: 500 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color-scheme: dark;
+}
+
+.export__time:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.export__time:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.export__len {
+  flex: none;
   color: var(--text-dim);
   font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 
 .export__hint {

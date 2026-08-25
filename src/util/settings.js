@@ -19,6 +19,13 @@ export const DEFAULT_SETTINGS = {
   // but it is a guess, and a guess the viewer can decline.
   matchAspect: true,
 
+  // Scrubbing, both off by default. The key-frame preview is the whole reason a
+  // drag across a long recording keeps up at all, and the short bursts of audio
+  // between seek steps are a cue some viewers navigate by -- so each is offered
+  // rather than chosen.
+  scrubExact: false,
+  pauseWhileSeeking: false,
+
   // Snapshots. JPEG at 85 is the photographic default; WebP is offered for the
   // roughly two-thirds smaller file but is not the default, because a still that
   // some other program refuses to open is worse than a larger one.

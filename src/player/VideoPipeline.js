@@ -5,6 +5,19 @@ import { FLAG_ISKEY } from '../bvr/constants.js'
 // multiplier lets outputs from a cancelled decode run be recognised and dropped.
 const TS_SCALE = 1e9
 
+/**
+ * How far ahead of the frame being asked for the pipeline decodes while the
+ * viewer is dragging the scrub bar.
+ *
+ * Far less than the playback window: a drag replaces its target several times a
+ * second, so anything decoded past it is thrown away by the next restart, and
+ * the reads it costs are reads the picture actually being waited on does not
+ * get. Not zero, though -- a decoder is allowed to hold a picture back until
+ * more input arrives, and a stream with any reorder depth at all would then
+ * never produce the one frame we asked it for.
+ */
+const SCRUB_AHEAD = 4
+
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
 /**
@@ -33,6 +46,8 @@ export class VideoPipeline {
     this.anchorIdx = 0
     this.maxAhead = 24
     this.maxBehind = 8
+    this.scrubbing = false
+    this._playAhead = 24
 
     this._pumping = false
     this._pumpQueued = false
@@ -50,7 +65,28 @@ export class VideoPipeline {
     const budget = 192 * 1024 * 1024
     const total = clamp(Math.floor(budget / bytesPerFrame), 6, 24)
     this.maxBehind = clamp(Math.floor(total / 3), 2, 8)
-    this.maxAhead = total - this.maxBehind
+    this._playAhead = total - this.maxBehind
+    this._applyWindow()
+  }
+
+  /**
+   * Enters or leaves scrub mode, which shortens the look-ahead only.
+   *
+   * The frames already decoded behind the anchor are left alone: they cost
+   * nothing to keep, and they are what makes a drag that doubles back land on a
+   * picture immediately.
+   */
+  setScrubbing (on) {
+    on = !!on
+    if (on === this.scrubbing) return
+    this.scrubbing = on
+    this._applyWindow()
+    // Leaving scrub mode re-opens the window; refill it.
+    if (!on) this.pump()
+  }
+
+  _applyWindow () {
+    this.maxAhead = this.scrubbing ? SCRUB_AHEAD : this._playAhead
   }
 
   async open (pstream, codecInfo) {
