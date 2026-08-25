@@ -58,10 +58,18 @@ what GitHub Pages serves and what you double-click. `build.bat` does the same
 from Explorer or a plain `cmd` window, installing dependencies first if
 `node_modules` is missing; pass `nopause` to skip the prompt at the end.
 
-The service worker is registered only in production builds. It is cache-first
-over every same-origin GET, so on the dev server it would pin each edited module
-to whatever was cached first; a dev page instead unregisters any worker left
-behind by a production build loaded from the same origin.
+The service worker is registered only in production builds; a dev page instead
+unregisters any worker left behind by a production build loaded from the same
+origin, so `npm run dev` can never be served a stale module.
+
+Its caching is arranged so a deploy is picked up without any cache-busting
+ritual. Navigations are network-first, and because the whole app is inlined into
+`index.html` there are no separate JS/CSS files that could go stale behind it —
+a new build lands on the next visit, subject only to the `max-age=600` GitHub
+Pages puts on every file. Icons and the manifest are stale-while-revalidate:
+served from cache at once, refreshed in the background. `CACHE` is a constant
+and does not need bumping per build; that would re-download the shell every
+deploy to fix a problem stale-while-revalidate already solves.
 
 Put `.bvr` files in `sample/` for local testing; that folder is git-ignored.
 
