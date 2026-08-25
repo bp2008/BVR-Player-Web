@@ -1,13 +1,5 @@
 <template>
-  <aside class="metapanel" aria-label="Recording metadata">
-    <header class="metapanel__head">
-      <AppIcon name="layers" :size="18" />
-      <h2 class="metapanel__title">Metadata</h2>
-      <button type="button" class="ctl-btn ctl-btn--small" aria-label="Close metadata" @click="$emit('close')">
-        <AppIcon name="close" :size="18" />
-      </button>
-    </header>
-
+  <div class="metapanel">
     <nav class="metapanel__tabs">
       <button
         v-for="t in tabs"
@@ -19,7 +11,7 @@
       >{{ t.label }}</button>
     </nav>
 
-    <div class="metapanel__scroll">
+    <div class="metapanel__content">
       <!-- ------------------------------------------------------------ file -->
       <section v-if="tab === 'file'" class="metasec">
         <h3 class="metasec__h">Recording</h3>
@@ -29,10 +21,22 @@
           <div v-if="state.startUtc"><dt>Starts</dt><dd>{{ formatUtc(state.startUtc) }}</dd></div>
           <div v-if="endUtc"><dt>Ends</dt><dd>{{ formatUtc(endUtc) }}</dd></div>
           <div><dt>Duration</dt><dd>{{ formatTime(state.duration, false) }}</dd></div>
-          <div><dt>Nominal rate</dt><dd>{{ state.fps ? state.fps.toFixed(2) + ' fps' : '--' }}</dd></div>
           <div v-if="orientation"><dt>Orientation</dt><dd>{{ orientation }}</dd></div>
           <div v-if="state.truncated"><dt>Tail</dt><dd class="kv--warn">truncated</dd></div>
           <div v-if="state.resyncs"><dt>Resynchronised</dt><dd class="kv--warn">{{ state.resyncs }}x</dd></div>
+        </dl>
+
+        <h3 class="metasec__h">Now playing</h3>
+        <dl class="kv">
+          <div><dt>Video</dt><dd>{{ state.videoLabel || '--' }}</dd></div>
+          <div><dt>Resolution</dt><dd>{{ state.width }} &times; {{ state.height }}</dd></div>
+          <div v-if="shownAs">
+            <dt>Shown as</dt>
+            <dd>{{ shownAs }}</dd>
+          </div>
+          <div><dt>Nominal rate</dt><dd>{{ state.fps ? state.fps.toFixed(2) + ' fps' : '--' }}</dd></div>
+          <div><dt>Frames</dt><dd>{{ state.frameCount.toLocaleString() }}</dd></div>
+          <div><dt>Source</dt><dd>{{ state.streamLabel }}</dd></div>
         </dl>
 
         <h3 class="metasec__h">Streams</h3>
@@ -47,7 +51,6 @@
           </div>
           <div v-if="state.switchingMode"><dt>Mode</dt><dd>switching (main when triggered)</dd></div>
           <div><dt>Audio</dt><dd>{{ state.hasAudio ? state.audioLabel : 'none' }}</dd></div>
-          <div><dt>Playing</dt><dd>{{ state.streamLabel }} &middot; {{ state.frameCount.toLocaleString() }} frames</dd></div>
         </dl>
 
         <template v-if="aoi.length">
@@ -165,7 +168,7 @@
       </section>
     </div>
 
-    <footer v-if="state.hasMetadata" class="metapanel__foot">
+    <div v-if="state.hasMetadata" class="metapanel__foot">
       <label class="metapanel__toggle">
         <input type="checkbox" :checked="state.overlayEnabled" @change="$emit('overlay', { enabled: $event.target.checked })" />
         <AppIcon name="eye" :size="16" />
@@ -176,8 +179,8 @@
         <label><input type="checkbox" :checked="show.text" @change="$emit('overlay', { text: $event.target.checked })" /> text</label>
         <label><input type="checkbox" :checked="show.graphics" @change="$emit('overlay', { graphics: $event.target.checked })" /> images</label>
       </div>
-    </footer>
-  </aside>
+    </div>
+  </div>
 </template>
 
 <script>
@@ -209,7 +212,7 @@ export default {
     show: { type: Object, required: true },
     metadataAt: { type: Function, default: null }
   },
-  emits: ['close', 'seek', 'overlay'],
+  emits: ['seek', 'overlay'],
   data () {
     return {
       tab: 'frame',
@@ -231,6 +234,23 @@ export default {
     },
     endUtc () {
       return this.context && this.context.index ? this.context.index.endUtc : 0
+    },
+    /**
+     * The size the picture is stretched to when the streams disagree in shape,
+     * or '' when this stream is already the reference shape. Mirrors the rule in
+     * Renderer._effective -- the short axis grows, so nothing is cropped.
+     */
+    shownAs () {
+      const ar = this.state.displayAspect
+      const w = this.state.width
+      const h = this.state.height
+      if (!ar || !w || !h) return ''
+      const native = w / h
+      if (Math.abs(native - ar) <= ar * 0.01) return ''
+      const out = native < ar
+        ? { w: Math.round(h * ar), h }
+        : { w, h: Math.round(w / ar) }
+      return `${out.w} × ${out.h}, rescaled to match`
     },
     orientation () {
       if (!this.header) return ''
@@ -401,39 +421,22 @@ export default {
 
 <style scoped>
 .metapanel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
   display: flex;
   flex-direction: column;
-  width: min(360px, 92vw);
-  background: rgba(13, 16, 22, 0.97);
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(14px);
-  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
+  min-height: 100%;
 }
 
-.metapanel__head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 12px 10px 12px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-}
-
-.metapanel__title {
-  flex: 1 1 auto;
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
+/* The tab strip stays put while the section under it scrolls; the panel frame
+   owns the scroll box, so this is sticky rather than a second scroll area. */
 .metapanel__tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   gap: 2px;
-  padding: 8px 10px 0;
+  padding: 6px 10px 0;
+  background: rgba(18, 22, 29, 0.97);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .metapanel__tab {
@@ -453,11 +456,9 @@ export default {
   border-bottom-color: var(--accent);
 }
 
-.metapanel__scroll {
+.metapanel__content {
   flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px 16px;
+  padding: 12px 13px 16px;
 }
 
 .metasec__h {
@@ -642,7 +643,7 @@ export default {
 
 .metapanel__foot {
   flex: none;
-  padding: 10px 14px 12px;
+  padding: 10px 13px 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.09);
 }
 

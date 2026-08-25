@@ -125,7 +125,11 @@ export class ThumbService {
   }
 
   _pump () {
-    while (this.active < this.limit + 1 && this.queue.length) {
+    // One job per worker. Going wider would only push the surplus onto the main
+    // thread, which is the thing the pool exists to avoid; without workers a
+    // single inline job at a time keeps the grid scrolling.
+    const cap = this.workersUsable ? this.limit : 1
+    while (this.active < cap && this.queue.length) {
       // Newest first: in a grid being scrolled, the last thing asked for is the
       // thing on screen.
       const job = this.queue.pop()

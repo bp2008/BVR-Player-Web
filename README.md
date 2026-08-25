@@ -31,14 +31,45 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Browse a folder | Browse button | <kbd>L</kbd> |
 | Metadata inspector | layers button | <kbd>I</kbd> |
 | Export to MP4 | download button | <kbd>E</kbd> |
+| Settings | gear button | |
+| Close a panel | its &times; | <kbd>Esc</kbd> |
 
 Double-clicking the video resets the zoom when zoomed in, and toggles fullscreen
 otherwise.
 
-The skip interval (default 10 s), time display (elapsed or wall clock), loop,
-playback speed, overlay drawing, and — for dual-stream recordings — the main/sub
-stream selection live in the settings menu and persist in the web browser's
-`localStorage`.
+The skip interval (default 10 s), whether a recording starts playing when it is
+opened (it does), time display (elapsed or wall clock), loop, playback speed,
+overlay drawing, and — for dual-stream recordings — the main/sub stream selection
+and whether the two are shown in the same shape, all live in the settings panel
+and persist in the web browser's `localStorage`.
+
+### Panels
+
+Settings, the metadata inspector and export are panels rather than dialogs. Any
+number of them can be open at once, docked to the left or right of the video, and
+each takes its width from the picture rather than covering it — the video is
+never hidden behind a panel.
+
+- **Move one** by dragging its title bar to the other side, or double-click the
+  title bar to send it across.
+- **Resize a dock** by dragging its inner edge. Panels are never allowed more
+  than 70% of the window between them; the video always keeps the rest.
+- **Too little room** and panels fold up to their title bars, or a whole dock
+  becomes a strip of buttons down the edge. Either way one click brings a panel
+  back, and nothing it was holding — a scroll position, a tab, a half-configured
+  export — is lost.
+- **Pop one out** into a small window of its own with the ⧉ button, and put it
+  back with the button in its place. Useful on a second monitor, and the panel
+  keeps working exactly as it did while docked.
+
+### Two streams of different shapes
+
+Blue Iris records a sub stream whose aspect ratio does not always match the main
+stream's — 1920×1080 alongside a 640×480 is ordinary output. In switching mode
+the two arrive interleaved, so the picture would otherwise change shape
+mid-playback. By default the smaller stream is stretched to the shape of the
+highest-resolution one, which is where the camera's real field of view is
+recorded; the setting can be turned off to see each stream exactly as encoded.
 
 ### Browsing a folder
 
@@ -57,8 +88,9 @@ works. Opening one file at a time is unaffected.
 BVR carries more than pictures: overlay text and clocks, motion and AI bounding
 boxes, GPS, per-frame camera state and DIO inputs, marks, and the camera's motion
 mask. The **metadata** button opens an inspector over three tabs — the file as a
-whole, the current frame, and a timeline of marks and recording-segment starts
-that seeks on click. Overlays can also be drawn back over the video, where they
+whole (including the codec, resolution and frame count of whatever is playing),
+the current frame, and a timeline of marks and recording-segment starts that
+seeks on click. Overlays can also be drawn back over the video, where they
 stay registered with the picture under rotation, flip and zoom.
 
 ### Exporting to MP4
@@ -68,7 +100,7 @@ ways:
 
 - **Copy frames** — the compressed frames are moved into an MP4 container
   untouched. Fast, lossless, and the file is about the size of the source. It can
-  only begin on a key frame, so the dialog says when the start has to shift.
+  only begin on a key frame, so the panel says when the start has to shift.
 - **Re-encode** — decode and encode again, which trims exactly and can change
   codec, bitrate, resolution and frame rate.
 
@@ -123,8 +155,12 @@ Put `.bvr` files in `sample/` for local testing; that folder is git-ignored.
 ### How it works
 
 ```
-src/bvr/       format layer  - frame headers, file header, full-file index, codec probe
-src/player/    playback      - decode pipelines, media clock, canvas renderer
+src/bvr/         format layer  - frame headers, file header, full-file index,
+                                 codec probe, overlay metadata records
+src/player/      playback      - decode pipelines, media clock, canvas renderer,
+                                 zoom/pan gestures, overlay painting
+src/library/     folder browser - directory access, thumbnail worker, IndexedDB cache
+src/export/      MP4 export    - Annex-B to AVCC, ISO BMFF muxer, remux/transcode
 src/components/  Vue 3 UI (Options API)
 ```
 
@@ -169,6 +205,41 @@ src/components/  Vue 3 UI (Options API)
   spec notes are unreliable (FLAC packets are stamped near their end; legacy
   files stamp every packet 0). PCM and G.711 µ-law are decoded directly; FLAC
   goes through `AudioDecoder`.
+- **Zoom.** The renderer never relies on the canvas intrinsic size; it draws
+  through an explicit transform (fit → zoom → pan → rotate → flip), so zooming
+  is a matter of writing the view and re-drawing. Frames are retained as
+  `ImageBitmap`s at native resolution, so zooming in reveals real detail rather
+  than magnifying a display-sized copy, and a zoom while paused re-presents the
+  current frame at full resolution. Pan is bounded by how far the drawn image
+  extends past the viewport, which collapses to zero at 1× and pins the picture
+  centred.
+- **Overlay metadata.** Type-2 records (spec §7) are deltas, so the state at a
+  given time is the first record folded together with every record since.
+  Replaying all of them after each seek would be thousands of reads on a long
+  clip, and the format's placement guarantees make that unnecessary: shapes and
+  every object that has ever changed are rewritten after each key frame, so a
+  rebuild costs record 0 plus the handful inside the current GOP. Overlays are
+  painted inside the frame transform, so they stay registered with the picture
+  under rotation, flip and zoom without handling any of them.
+
+  One correction to the spec: §7.1 calls the overlay and shape rectangles "video
+  pixels", but every file Blue Iris writes uses per-axis thousandths — a
+  full-frame overlay is `(0, 0, 1000, 1000)`, and boxes on a 1920×1080 recording
+  reach exactly 1000 at the frame edge. The parser reads thousandths and falls
+  back to pixels for any rectangle that overflows that range.
+- **Export.** A stream copy never decodes: each access unit's start codes become
+  length prefixes and the same slice bytes are handed to the writer, with the
+  parameter sets hoisted into `avcC`/`hvcC`. The muxer writes `ftyp`, `mdat`,
+  `moov` in that order — index last is what keeps the job to one pass, since
+  sample sizes are only known once each sample has been converted, and reading
+  the source twice to learn them in advance would double the I/O on a file that
+  may be gigabytes. It also means parameter sets can be collected from every key
+  frame visited rather than guessed from the first.
+- **Thumbnails.** Fixed cost per clip regardless of length: the header, a walk to
+  the first key frame, that key frame, and a backwards read from EOF for the
+  duration (spec §9.3). Decoding runs in a small worker pool, feature-detected
+  with an inline fallback because `new Worker()` is unavailable on `file://`;
+  Vite's `?worker&inline` keeps the worker inside the single-file build.
 
 The container format details were provided by the Blue Iris developer and is avialable here: [BVR_File_Format_Spec.md](BVR_File_Format_Spec.md).
 

@@ -4,7 +4,7 @@ Internal roadmap notes. This file is **not** part of the deployed app — it is 
 referenced from `index.html`, not copied out of `public/`, and never reaches the
 built `docs/` output.
 
-Version 1 shipped only the transport controls. The four features below have since
+Version 1 shipped only the transport controls. The five features below have since
 been built; what follows records how each one turned out, the places where the
 implementation had to disagree with the spec, and the one item still outstanding.
 
@@ -26,6 +26,16 @@ In-app browsing of a directory of `.bvr` files, with a thumbnail per clip.
   whether the recording is thirty seconds or two hours. The **sub** stream is
   preferred when present: smaller, faster, and it scales down to a thumbnail
   better anyway.
+- The key frame is read **whole**. Reading only its front — enough for the
+  parameter sets — was enough to configure a decoder but not to decode a picture,
+  and any key frame past that budget came out half black: the top slices decoded,
+  the rest missing. A 1920×1080 key frame is routinely 200 KB.
+- The downscale goes through `createImageBitmap`'s own resize rather than one
+  `drawImage`. A single bilinear step from 1920 to 384 samples one source pixel in
+  five and discards the rest, which is why it read as nearest-neighbour; the
+  native resize is both the better picture and the cheaper one. Where it is
+  unavailable the fallback halves repeatedly, each step averaging four pixels into
+  one.
 - Clip length comes from spec §9.3 — read backwards from EOF for the last
   complete video frame (`src/bvr/tail.js`). Two short reads give a duration for a
   file that is never otherwise opened.
@@ -73,7 +83,7 @@ Both modes shipped, sharing one muxer (`src/export/`).
   reading the source twice to learn them in advance would double the I/O on a
   file that may be gigabytes.
 - **Audio.** FLAC, PCM and µ-law all go through `AudioEncoder` to AAC, since none
-  of the three has an MP4 form players can be relied on to handle. The dialog
+  of the three has an MP4 form players can be relied on to handle. The panel
   says so. Audio is encoded first and spliced into the video stream at
   one-second chunk boundaries.
 - **Trim.** Handles on the scrub bar, plus "start/end at playhead". A stream copy
@@ -82,7 +92,7 @@ Both modes shipped, sharing one muxer (`src/export/`).
 - **Delivery.** `showSaveFilePicker()` where available, so a multi-gigabyte
   export never exists in memory; a Blob download otherwise, with a warning above
   1.5 GB.
-- **Switching mode** is refused for a stream copy and the dialog explains why —
+- **Switching mode** is refused for a stream copy and the panel explains why —
   the resolution change mid-stream is what MP4 tolerates poorly, so the user is
   pointed at the single-stream selection instead.
 
@@ -120,6 +130,47 @@ Marks and segment starts are collected from the **whole file** rather than from
 the stream being played: a dual-stream recording routinely puts its mark on one
 stream only, and `utilityvisible` in `sample/` does exactly that.
 
+## 5. Docked panels — **done**
+
+Settings, the metadata inspector and export share one docking system instead of
+being a popup, an overlay and a modal dialog respectively.
+
+- `src/panels/panels.js` — the one list of panels, read by the layout solver, the
+  persisted settings, the control-bar buttons and the panel frames, so a panel
+  cannot exist in one of those and not the others.
+- `src/panels/layout.js` — `solveDocks()` decides both dock widths at once. The
+  rules interact (a preferred width, a floor, a ceiling that belongs to both docks
+  together, and a different shape when even the floors do not fit), and they are
+  only checkable if they are read in one place.
+- **The 70% rule** is the governing constraint: whatever else happens, the video
+  keeps 30% of the window. Below roughly 750 px there is no room for two open
+  docks, so the inactive one becomes a strip of buttons; its panels stay mounted,
+  which is what makes swapping instant and lossless.
+- **Vertically**, panels in one dock share its height and fold to their title bars
+  when there is not enough of it, most-recently-used staying open. The titles
+  never leave, so switching is one click either way.
+- `src/components/PanelFrame.vue` only *detects* a title-bar drag; where it may
+  land is a question about the docks, which the frame cannot see. `App` answers it
+  by reading where the panels actually are on screen, because CSS `order` decides
+  that and only the layout knows.
+- **Pop-out** is a `<Teleport>` into a second window's document rather than a
+  second copy of the panel: same component instance, so the scroll position, the
+  open tab and a half-configured export all survive the move. `src/panels/popout.js`
+  handles the two things that do not travel by themselves — the stylesheets, and
+  the window's own lifetime. A blocked popup is an ordinary outcome and leaves the
+  panel docked with a notice.
+
+### What this replaced
+
+`SettingsMenu.vue` and `ExportDialog.vue` are gone. Export in particular was the
+wrong shape as a modal: it trims a range, and the video it is trimming was behind
+it with the scrub bar unreachable. The recording's own facts — codec, resolution,
+nominal rate, frame count — moved from the settings popup to the metadata panel,
+which is where a description of the file belongs.
+
+Panels no longer close when the next recording is opened. That was only ever a
+consequence of their having been overlays.
+
 ---
 
 ## Cross-cutting items
@@ -133,6 +184,17 @@ stream only, and `utilityvisible` in `sample/` does exactly that.
   Indexing stays on the main thread: it already yields to the event loop often
   enough to keep the progress bar painting, and it is bounded by read throughput
   rather than by computation, so a worker would buy little.
+- **Matched stream shapes — done.** A file with two streams whose aspect ratios
+  disagree now shows both in the shape of the highest-resolution one, which is
+  the stream carrying the camera's real field of view. It is the renderer's
+  destination rectangle that changes, so overlays stay registered with the
+  picture and the current frame is simply re-presented when the setting is
+  toggled. The short axis is stretched rather than the long one cropped: nothing
+  the recording contains is discarded, and a squeezed sub stream is what the
+  stretch undoes. Streams within 1% of each other are left alone -- encoders
+  round to macroblocks, and re-shaping a picture that is already right only costs
+  sharpness.
+
 - **Very large files — not done, deliberately.** The design still scans the whole
   file once on open. Making the index sparse and seeking by the spec's
   interpolate-and-search (§9.5) would help a multi-gigabyte clip on a network

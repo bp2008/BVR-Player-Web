@@ -20,6 +20,9 @@ export class Renderer {
     this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true })
     this.rotation = 0
     this.flipH = false
+    // Width/height the picture should be shown at, whatever shape the frames
+    // arrive in; 0 means "as decoded". See setDisplayAspect.
+    this.displayAspect = 0
     this.view = { zoom: 1, panX: 0, panY: 0 }
     this.lastFrame = null
     // Painted inside the frame transform, after the picture itself.
@@ -36,6 +39,42 @@ export class Renderer {
 
   setOverlayPainter (fn) {
     this.overlayPainter = fn || null
+  }
+
+  /**
+   * Forces every frame to a given display aspect ratio, or 0 for none.
+   *
+   * A recording with two streams may hold two differently shaped pictures of
+   * the same scene -- 1920x1080 alongside a 640x480 sub stream is ordinary Blue
+   * Iris output -- and in switching mode the two arrive interleaved, so without
+   * this the picture changes shape mid-playback. The camera's real field of view
+   * is the one the high-resolution stream describes, so that is the shape both
+   * are shown in.
+   */
+  setDisplayAspect (aspect) {
+    const a = Number(aspect)
+    this.displayAspect = Number.isFinite(a) && a > 0 ? a : 0
+  }
+
+  /**
+   * The size a frame is drawn at: its own, unless a display aspect is in force
+   * and the frame disagrees with it.
+   *
+   * The short axis is stretched rather than the long one cropped. Cropping would
+   * discard picture the recording does contain, and a mismatched surveillance
+   * sub stream is squeezed rather than cropped in the first place -- undoing the
+   * squeeze is exactly what restores it.
+   */
+  _effective (sw, sh) {
+    const target = this.displayAspect
+    if (!target || !(sw > 0) || !(sh > 0)) return { w: sw, h: sh }
+    const native = sw / sh
+    // A percent of slack: encoders round to macroblocks, and re-shaping a
+    // picture that is already the right shape only costs sharpness.
+    if (Math.abs(native - target) <= target * 0.01) return { w: sw, h: sh }
+    return native < target
+      ? { w: sh * target, h: sh }
+      : { w: sw, h: sw / target }
   }
 
   /** Matches the backing store to the element box; returns true when it changed. */
@@ -150,10 +189,13 @@ export class Renderer {
     if (!frame) return
     this.lastFrame = frame
     const { ctx } = this
-    const sw = frame.displayWidth || frame.width || 0
-    const sh = frame.displayHeight || frame.height || 0
-    if (!sw || !sh) return
+    const fw = frame.displayWidth || frame.width || 0
+    const fh = frame.displayHeight || frame.height || 0
+    if (!fw || !fh) return
 
+    // Everything downstream -- fit, zoom bounds, overlay coordinates -- works in
+    // the shape the picture is shown at, not the shape it decoded to.
+    const { w: sw, h: sh } = this._effective(fw, fh)
     const g = this._measure(sw, sh)
     this._geom = g
     this.clampView()

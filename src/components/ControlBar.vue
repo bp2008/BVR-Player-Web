@@ -118,37 +118,18 @@
       />
 
       <button
-        v-if="state.hasMetadata"
+        v-for="b in panelButtons"
+        :key="b.id"
         type="button"
         class="ctl-btn"
-        :class="{ 'ctl-btn--active': metadataOpen }"
-        title="Metadata (I)"
-        aria-label="Metadata"
-        :aria-pressed="metadataOpen ? 'true' : 'false'"
-        @click="$emit('toggle-metadata')"
+        :class="{ 'ctl-btn--active': panelOpen[b.id] }"
+        :title="b.title"
+        :aria-label="b.label"
+        :aria-pressed="panelOpen[b.id] ? 'true' : 'false'"
+        @click="$emit('toggle-panel', b.id)"
       >
-        <AppIcon name="layers" :size="20" />
+        <AppIcon :name="b.icon" :size="20" />
       </button>
-
-      <button
-        type="button"
-        class="ctl-btn"
-        title="Export to MP4 (E)"
-        aria-label="Export to MP4"
-        @click="$emit('export')"
-      >
-        <AppIcon name="download" :size="20" />
-      </button>
-
-      <SettingsMenu
-        :settings="settings"
-        :state="state"
-        @patch="(p) => $emit('patch', p)"
-        @stream="(m) => $emit('stream', m)"
-        @overlay="(p) => $emit('overlay', p)"
-        @rate="(v) => $emit('rate', v)"
-        @open-change="(o) => setMenuOpen('settings', o)"
-      />
 
       <button
         type="button"
@@ -167,31 +148,51 @@
 import AppIcon from './AppIcon.vue'
 import SeekBar from './SeekBar.vue'
 import VolumeControl from './VolumeControl.vue'
-import SettingsMenu from './SettingsMenu.vue'
 import PopMenu from './PopMenu.vue'
 import { formatTime, formatUtc } from '../util/format.js'
 import { streamChipLabel, streamOptions } from '../util/streams.js'
 import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
+import { PANELS } from '../panels/panels.js'
+
+const PANEL_KEYS = { metadata: 'I', export: 'E', settings: '' }
 
 export default {
   name: 'ControlBar',
-  components: { AppIcon, SeekBar, VolumeControl, SettingsMenu, PopMenu },
+  components: { AppIcon, SeekBar, VolumeControl, PopMenu },
   props: {
     state: { type: Object, required: true },
     settings: { type: Object, required: true },
     fullscreen: { type: Boolean, default: false },
-    metadataOpen: { type: Boolean, default: false },
+    panelOpen: { type: Object, required: true },
     trim: { type: Object, default: null }
   },
   emits: [
     'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume', 'toggle-mute',
-    'toggle-fullscreen', 'patch', 'stream', 'menu-open', 'rate', 'reset-zoom',
-    'toggle-metadata', 'export', 'overlay', 'trim'
+    'toggle-fullscreen', 'stream', 'menu-open', 'rate', 'reset-zoom',
+    'toggle-panel', 'trim'
   ],
   data () {
-    return { openMenus: { settings: false, stream: false, rate: false } }
+    return { openMenus: { stream: false, rate: false } }
   },
   computed: {
+    /**
+     * One toggle per panel, in the order the dock knows them. Metadata is
+     * dropped for a recording that has none rather than shown disabled -- there
+     * is nothing the viewer could do about it.
+     */
+    panelButtons () {
+      return PANELS
+        .filter((p) => p.id !== 'metadata' || this.state.hasMetadata)
+        .map((p) => {
+          const key = PANEL_KEYS[p.id]
+          return {
+            id: p.id,
+            icon: p.icon,
+            label: p.title,
+            title: key ? `${p.title} (${key})` : p.title
+          }
+        })
+    },
     skipSeconds () { return this.settings.skipSeconds },
     skipLabel () {
       const s = this.settings.skipSeconds

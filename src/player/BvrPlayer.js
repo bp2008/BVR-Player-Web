@@ -67,6 +67,10 @@ export function createBlankState () {
     codecWarning: '',
     error: '',
 
+    // Non-zero when the streams disagree about shape and the smaller one is
+    // being stretched to match the larger (see _targetAspect).
+    displayAspect: 0,
+
     // Digital zoom, driven from outside by the ViewController.
     zoom: 1,
     zoomed: false,
@@ -119,6 +123,7 @@ export class BvrPlayer {
     this.blob = null
 
     this.streamMode = 'auto'
+    this.matchAspect = true
     this.frameIntervalMs = 33.367
 
     this.curIdx = -1
@@ -189,6 +194,7 @@ export class BvrPlayer {
 
       this.renderer.setOrientation(this.header.rotation, this.header.flipH)
       this.renderer.resetView()
+      this._applyDisplayAspect()
 
       await this._selectStream(this.streamMode, true)
       if (gen !== this._generation) return
@@ -279,6 +285,56 @@ export class BvrPlayer {
       await this._gotoIndex(frameIndexForTime(pstream, atTime))
       if (wasPlaying) this.play()
     }
+  }
+
+  /**
+   * Turns the "rescale mismatched streams" behaviour on or off.
+   *
+   * Cheap enough to apply live: it only changes the destination rectangle the
+   * renderer draws into, so the current frame is simply re-presented.
+   */
+  setMatchAspect (on) {
+    const next = !!on
+    if (next === this.matchAspect) return
+    this.matchAspect = next
+    this._applyDisplayAspect()
+    this._repaint()
+  }
+
+  _applyDisplayAspect () {
+    const aspect = this._targetAspect()
+    this.renderer.setDisplayAspect(aspect)
+    this._emit({ displayAspect: aspect })
+  }
+
+  /**
+   * The aspect ratio every frame should be shown in, or 0 to leave frames as
+   * they decoded.
+   *
+   * Only a file with two present streams that disagree about shape gets one: the
+   * highest-resolution stream is the one carrying the camera's real field of
+   * view, so its ratio is the truth and the other stream is the one that was
+   * squeezed to fit a smaller encoder. A single-stream recording has nothing to
+   * disagree with and is always left alone.
+   */
+  _targetAspect () {
+    if (!this.matchAspect || !this.header) return 0
+    const dims = []
+    for (let si = 0; si < 2; si++) {
+      if (this.index && this.index.streams[si].count === 0) continue
+      const probed = this.probe && this.probe.streams[si]
+      const bmih = this.header.bmih[si]
+      const w = (probed && probed.width) || (bmih && bmih.width) || 0
+      const h = (probed && probed.height) || (bmih && bmih.height) || 0
+      if (w > 0 && h > 0) dims.push({ w, h, px: w * h })
+    }
+    if (dims.length < 2) return 0
+    dims.sort((a, b) => b.px - a.px)
+    const target = dims[0].w / dims[0].h
+    const other = dims[1].w / dims[1].h
+    // Two streams of the same shape need no correction, whatever their sizes.
+    if (Math.abs(target - other) <= target * 0.01) return 0
+    return target
   }
 
   /** Whether a source stream may be fed to the decoder; unprobed means "try it". */
@@ -467,6 +523,7 @@ export class BvrPlayer {
     this.clock.currentTime = 0
     this.renderer.forget()
     this.renderer.resetView()
+    this.renderer.setDisplayAspect(0)
     this.renderer.clear()
   }
 

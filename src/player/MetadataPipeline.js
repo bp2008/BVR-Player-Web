@@ -26,6 +26,11 @@ const META_WINDOW = 256 << 10
 // stepping back and forth over the same GOP.
 const CACHE_LIMIT = 256
 
+// How far ahead a forward seek may fold records one by one before rebuilding
+// from the GOP is the cheaper route. A rebuild costs record 0 plus one GOP, so
+// the crossover is well under a hundred.
+const REBUILD_AFTER = 64
+
 export class MetadataPipeline {
   constructor ({ blob, index, onChange }) {
     this.reader = new BlobReader(blob, META_WINDOW)
@@ -132,8 +137,12 @@ export class MetadataPipeline {
       this.onChange(this.state)
       return
     }
-    if (target > this._applied && this._applied >= 0) {
-      from = this._applied + 1               // playing forward
+    // Playing forward, or a seek short enough that folding the records in one at
+    // a time is cheaper than a rebuild. A long forward seek is not: jumping half
+    // an hour ahead would replay thousands of records to reach a state the GOP
+    // rewrites give in a handful of reads.
+    if (target > this._applied && this._applied >= 0 && target - this._applied <= REBUILD_AFTER) {
+      from = this._applied + 1
     } else {
       // A backward jump, or the first position of the file. Rebuild from the
       // opening record plus this GOP's worth of rewrites.

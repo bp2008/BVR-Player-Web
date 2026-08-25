@@ -2,7 +2,7 @@
   <div
     ref="root"
     class="app"
-    :class="{ 'app--idle': !hasFile, 'app--hide-ui': !uiVisible }"
+    :class="{ 'app--idle': !hasFile, 'app--hide-ui': !uiVisible, 'app--dragpanel': !!dragging }"
     @dragenter.prevent="onDragEnter"
     @dragover.prevent="onDragOver"
     @dragleave.prevent="onDragLeave"
@@ -11,124 +11,215 @@
     @pointerdown="onPointerDown"
     @pointerleave="onPointerLeave"
   >
-    <div class="stage" ref="stage" @click="onStageClick" @dblclick="onStageDblClick">
-      <canvas ref="canvas" class="stage__canvas" :class="{ 'stage__canvas--grab': state.zoomed }"></canvas>
+    <div class="app__body" ref="body">
+      <!-- One element per dock. Which side of the video each lands on is CSS
+           `order`, so the stage can stay in one place in the markup. -->
+      <aside
+        v-for="side in SIDES"
+        :key="side"
+        class="dock"
+        :class="[
+          'dock--' + side,
+          'dock--' + docks[side].mode,
+          { 'dock--drop': dragging && dropHint.side === side }
+        ]"
+        :style="dockStyle(side)"
+      >
+        <div
+          v-if="docks[side].mode === 'open'"
+          class="dock__resizer"
+          role="separator"
+          :aria-label="`Resize the ${side} panels`"
+          @pointerdown="startResize(side, $event)"
+        ></div>
 
-      <div v-if="!hasFile" class="dropzone">
-        <div class="dropzone__card">
-          <AppIcon name="film" :size="46" />
-          <h1 class="dropzone__title">BVR Player</h1>
-          <p class="dropzone__text">
-            Drop a Blue Iris <code>.bvr</code> recording here, or choose one to open.
-            Files are decoded locally in your browser and never uploaded.
-          </p>
-          <div class="dropzone__buttons">
-            <button type="button" class="btn btn--accent" @click.stop="pickFile">
-              <AppIcon name="folder" :size="18" />
-              <span>Open .bvr file</span>
+        <div v-if="docks[side].mode === 'rail'" class="dock__rail">
+          <button
+            v-for="id in dockIds(side)"
+            :key="id"
+            type="button"
+            class="rail__btn"
+            :class="{ 'rail__btn--on': id === activePanel }"
+            :title="`Show ${panelTitle(id)}`"
+            @click="focusPanel(id)"
+          >
+            <AppIcon :name="panelIcon(id)" :size="18" />
+            <span class="rail__label">{{ panelShort(id) }}</span>
+          </button>
+        </div>
+
+        <div :id="'dock-stack-' + side" class="dock__stack"></div>
+      </aside>
+
+      <div class="stage" ref="stage" @click="onStageClick" @dblclick="onStageDblClick">
+        <canvas ref="canvas" class="stage__canvas" :class="{ 'stage__canvas--grab': state.zoomed }"></canvas>
+
+        <div v-if="!hasFile" class="dropzone">
+          <div class="dropzone__card">
+            <AppIcon name="film" :size="46" />
+            <h1 class="dropzone__title">BVR Player</h1>
+            <p class="dropzone__text">
+              Drop a Blue Iris <code>.bvr</code> recording here, or choose one to open.
+              Files are decoded locally in your browser and never uploaded.
+            </p>
+            <div class="dropzone__buttons">
+              <button type="button" class="btn btn--accent" @click.stop="pickFile">
+                <AppIcon name="folder" :size="18" />
+                <span>Open .bvr file</span>
+              </button>
+              <button v-if="canBrowse" type="button" class="btn" @click.stop="openLibrary">
+                <AppIcon name="library" :size="18" />
+                <span>Browse a folder</span>
+              </button>
+            </div>
+            <p v-if="!webCodecsOk" class="dropzone__warn">
+              <AppIcon name="alert" :size="16" />
+              <span>This browser has no WebCodecs support. Use a recent Chrome, Edge or Opera.</span>
+            </p>
+          </div>
+        </div>
+
+        <div v-if="state.status === 'loading'" class="overlay">
+          <div class="overlay__box">
+            <div class="spinner"></div>
+            <p class="overlay__title">Indexing {{ state.fileName }}</p>
+            <div class="progress"><div class="progress__bar" :style="{ width: (state.loadProgress * 100).toFixed(1) + '%' }"></div></div>
+            <p class="overlay__sub">{{ (state.loadProgress * 100).toFixed(0) }}% of {{ formatBytes(state.fileSize) }}</p>
+            <p v-if="state.codecWarning" class="overlay__warn">
+              <AppIcon name="alert" :size="15" />
+              <span>{{ state.codecWarning }}</span>
+            </p>
+          </div>
+        </div>
+
+        <div v-if="state.status === 'error'" class="overlay">
+          <div class="overlay__box overlay__box--error">
+            <AppIcon name="alert" :size="34" />
+            <p class="overlay__title">Could not play this file</p>
+            <p class="overlay__sub overlay__sub--wrap">{{ state.error }}</p>
+            <button type="button" class="btn" @click.stop="pickFile">Choose another file</button>
+          </div>
+        </div>
+
+        <button
+          v-if="hasFile && !state.playing && state.status === 'ready' && !state.buffering"
+          type="button"
+          class="bigplay"
+          aria-label="Play"
+          @click.stop="togglePlay"
+        >
+          <AppIcon name="play" :size="42" />
+        </button>
+
+        <header class="topbar">
+          <div class="topbar__left">
+            <AppIcon name="film" :size="18" />
+            <span class="topbar__name">{{ state.fileName || 'BVR Player' }}</span>
+            <span v-if="state.truncated" class="topbar__flag" title="The final frame is incomplete; playback stops at the last whole frame.">truncated</span>
+          </div>
+          <div class="topbar__right">
+            <button v-if="installPrompt" type="button" class="btn btn--ghost" @click.stop="install">Install</button>
+            <button v-if="canBrowse" type="button" class="btn btn--ghost" title="Browse a folder (L)" @click.stop="openLibrary">
+              <AppIcon name="library" :size="16" />
+              <span class="topbar__btntext">Browse</span>
             </button>
-            <button v-if="canBrowse" type="button" class="btn" @click.stop="openLibrary">
-              <AppIcon name="library" :size="18" />
-              <span>Browse a folder</span>
+            <button type="button" class="btn btn--ghost" title="Open a file (O)" @click.stop="pickFile">
+              <AppIcon name="folder" :size="16" />
+              <span>Open</span>
             </button>
           </div>
-          <p v-if="!webCodecsOk" class="dropzone__warn">
-            <AppIcon name="alert" :size="16" />
-            <span>This browser has no WebCodecs support. Use a recent Chrome, Edge or Opera.</span>
-          </p>
-        </div>
+        </header>
+
+        <!-- Only while a title bar is in flight: somewhere to aim at, including
+             for a side that holds no panels yet and so has no dock on screen. -->
+        <template v-if="dragging">
+          <div class="dropedge dropedge--left" :class="{ 'dropedge--on': dropHint.side === 'left' }">
+            <AppIcon name="dockLeft" :size="20" />
+          </div>
+          <div class="dropedge dropedge--right" :class="{ 'dropedge--on': dropHint.side === 'right' }">
+            <AppIcon name="dockRight" :size="20" />
+          </div>
+        </template>
+
+        <ControlBar
+          v-if="state.status === 'ready'"
+          class="controlbar"
+          :state="state"
+          :settings="settings"
+          :fullscreen="isFullscreen"
+          :panel-open="panelOpen"
+          :trim="panelOpen.export ? trim : null"
+          @toggle-play="togglePlay"
+          @skip="onSkip"
+          @step="onStep"
+          @seek="onSeek"
+          @scrubbing="onScrubbing"
+          @volume="onVolume"
+          @toggle-mute="onToggleMute"
+          @toggle-fullscreen="toggleFullscreen"
+          @stream="onStream"
+          @rate="onRate"
+          @reset-zoom="resetZoom"
+          @toggle-panel="togglePanel"
+          @trim="onTrim"
+          @menu-open="onMenuOpen"
+        />
       </div>
-
-      <div v-if="state.status === 'loading'" class="overlay">
-        <div class="overlay__box">
-          <div class="spinner"></div>
-          <p class="overlay__title">Indexing {{ state.fileName }}</p>
-          <div class="progress"><div class="progress__bar" :style="{ width: (state.loadProgress * 100).toFixed(1) + '%' }"></div></div>
-          <p class="overlay__sub">{{ (state.loadProgress * 100).toFixed(0) }}% of {{ formatBytes(state.fileSize) }}</p>
-          <p v-if="state.codecWarning" class="overlay__warn">
-            <AppIcon name="alert" :size="15" />
-            <span>{{ state.codecWarning }}</span>
-          </p>
-        </div>
-      </div>
-
-      <div v-if="state.status === 'error'" class="overlay">
-        <div class="overlay__box overlay__box--error">
-          <AppIcon name="alert" :size="34" />
-          <p class="overlay__title">Could not play this file</p>
-          <p class="overlay__sub overlay__sub--wrap">{{ state.error }}</p>
-          <button type="button" class="btn" @click.stop="pickFile">Choose another file</button>
-        </div>
-      </div>
-
-      <button
-        v-if="hasFile && !state.playing && state.status === 'ready' && !state.buffering"
-        type="button"
-        class="bigplay"
-        aria-label="Play"
-        @click.stop="togglePlay"
-      >
-        <AppIcon name="play" :size="42" />
-      </button>
-
-      <header class="topbar">
-        <div class="topbar__left">
-          <AppIcon name="film" :size="18" />
-          <span class="topbar__name">{{ state.fileName || 'BVR Player' }}</span>
-          <span v-if="hasFile" class="topbar__meta">{{ state.width }}&times;{{ state.height }} &middot; {{ state.videoLabel }}</span>
-          <span v-if="state.truncated" class="topbar__flag" title="The final frame is incomplete; playback stops at the last whole frame.">truncated</span>
-        </div>
-        <div class="topbar__right">
-          <button v-if="installPrompt" type="button" class="btn btn--ghost" @click.stop="install">Install</button>
-          <button v-if="canBrowse" type="button" class="btn btn--ghost" title="Browse a folder (L)" @click.stop="openLibrary">
-            <AppIcon name="library" :size="16" />
-            <span class="topbar__btntext">Browse</span>
-          </button>
-          <button type="button" class="btn btn--ghost" title="Open a file (O)" @click.stop="pickFile">
-            <AppIcon name="folder" :size="16" />
-            <span>Open</span>
-          </button>
-        </div>
-      </header>
-
-      <MetadataPanel
-        v-if="metadataOpen && state.status === 'ready'"
-        :state="state"
-        :context="inspectContext"
-        :show="overlayShow"
-        :metadata-at="metadataAt"
-        @close="metadataOpen = false"
-        @seek="(ms) => onSeek(ms, false)"
-        @overlay="onOverlay"
-      />
-
-      <ControlBar
-        v-if="state.status === 'ready'"
-        class="controlbar"
-        :state="state"
-        :settings="settings"
-        :fullscreen="isFullscreen"
-        :metadata-open="metadataOpen"
-        :trim="exportOpen ? trim : null"
-        @toggle-play="togglePlay"
-        @skip="onSkip"
-        @step="onStep"
-        @seek="onSeek"
-        @scrubbing="onScrubbing"
-        @volume="onVolume"
-        @toggle-mute="onToggleMute"
-        @toggle-fullscreen="toggleFullscreen"
-        @patch="patchSettings"
-        @stream="onStream"
-        @rate="onRate"
-        @reset-zoom="resetZoom"
-        @toggle-metadata="toggleMetadata"
-        @overlay="onOverlay"
-        @export="openExport"
-        @trim="onTrim"
-        @menu-open="onMenuOpen"
-      />
     </div>
+
+    <!-- Every open panel is rendered exactly once and teleported to wherever it
+         currently lives: a dock stack, or the body of its own popup window. The
+         component instance is the same either way, so moving a panel keeps its
+         scroll position, its tab and any half-configured export. -->
+    <template v-for="id in openIds" :key="id">
+      <Teleport v-if="panelTarget(id)" :to="panelTarget(id)">
+        <PanelFrame
+          :title="panelTitle(id)"
+          :icon="panelIcon(id)"
+          :order="panelOrderIn(id)"
+          :collapsed="collapsedMap[id]"
+          :popped="!!popTargets[id]"
+          :active="id === activePanel"
+          @activate="activatePanel(id)"
+          @toggle="toggleCollapsed(id)"
+          @popout="togglePop(id)"
+          @close="closePanel(id)"
+          @flip="flipSide(id)"
+          @drag-start="onPanelDragStart(id)"
+          @drag-move="onPanelDragMove"
+          @drag-end="onPanelDragEnd"
+        >
+          <SettingsPanel
+            v-if="id === 'settings'"
+            :settings="settings"
+            :state="state"
+            @patch="patchSettings"
+            @stream="onStream"
+            @overlay="onOverlay"
+            @rate="onRate"
+          />
+          <MetadataPanel
+            v-else-if="id === 'metadata'"
+            :state="state"
+            :context="fileContext"
+            :show="overlayShow"
+            :metadata-at="metadataAt"
+            @seek="(ms) => onSeek(ms, false)"
+            @overlay="onOverlay"
+          />
+          <ExportPanel
+            v-else
+            :context="fileContext"
+            :trim="trim"
+            :current-time="state.currentTime"
+            :duration="state.duration"
+            @close="closePanel('export')"
+            @trim="onTrim"
+            @notice="showNotice"
+          />
+        </PanelFrame>
+      </Teleport>
+    </template>
 
     <FolderBrowser
       v-if="libraryOpen"
@@ -138,17 +229,6 @@
       @close="libraryOpen = false"
       @open="onLibraryOpen"
       @patch="patchSettings"
-      @notice="showNotice"
-    />
-
-    <ExportDialog
-      v-if="exportOpen"
-      :context="exportContext"
-      :trim="trim"
-      :current-time="state.currentTime"
-      :duration="state.duration"
-      @close="closeExport"
-      @trim="onTrim"
       @notice="showNotice"
     />
 
@@ -181,12 +261,17 @@ import AppIcon from './components/AppIcon.vue'
 import ControlBar from './components/ControlBar.vue'
 import FolderBrowser from './components/FolderBrowser.vue'
 import MetadataPanel from './components/MetadataPanel.vue'
-import ExportDialog from './components/ExportDialog.vue'
+import ExportPanel from './components/ExportPanel.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
+import PanelFrame from './components/PanelFrame.vue'
 import { BvrPlayer, createBlankState, PLAYBACK_RATES } from './player/BvrPlayer.js'
 import { ViewController } from './player/ViewController.js'
 import { canBrowseDirectories, openEntry } from './library/directory.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { formatBytes } from './util/format.js'
+import { PANELS, panelDef } from './panels/panels.js'
+import { solveDocks, maxExpanded, MIN_DOCK, MAX_DOCK } from './panels/layout.js'
+import { openPanelWindow, closePanelWindow } from './panels/popout.js'
 
 // How long the chrome lingers after the last pointer activity. Touch gets a
 // longer grace period because there is no hover to bring it back - only a tap.
@@ -194,15 +279,23 @@ const UI_IDLE_MS = 2600
 const UI_IDLE_TOUCH_MS = 4200
 
 // A pointer resting anywhere inside these keeps the chrome up indefinitely.
-const CHROME_SELECTOR = '.topbar, .controlbar, .metapanel'
+const CHROME_SELECTOR = '.topbar, .controlbar, .dock'
+
+const SIDES = ['left', 'right']
+
+const blankPanelMap = (value) => Object.fromEntries(PANELS.map((p) => [p.id, value]))
 
 export default {
   name: 'App',
-  components: { AppIcon, ControlBar, FolderBrowser, MetadataPanel, ExportDialog },
+  components: {
+    AppIcon, ControlBar, FolderBrowser, MetadataPanel, ExportPanel, SettingsPanel, PanelFrame
+  },
   data () {
+    const settings = loadSettings()
     return {
+      SIDES,
       state: createBlankState(),
-      settings: loadSettings(),
+      settings,
       dragDepth: 0,
       notice: '',
       isFullscreen: false,
@@ -212,10 +305,30 @@ export default {
       pointerOverChrome: false,
       installPrompt: null,
       libraryOpen: false,
-      metadataOpen: false,
-      exportOpen: false,
-      exportContext: null,
-      inspectContext: null,
+      mounted: false,
+
+      // ------------------------------------------------------------- panels
+      panelOpen: blankPanelMap(false),
+      // Collapsed *by the viewer*. A panel can also be collapsed because the
+      // dock ran out of height; see collapsedMap.
+      panelCollapsed: blankPanelMap(false),
+      // id -> the element inside its popup window, when it has one.
+      popTargets: {},
+      // Monotonic per panel: the most recently touched panels are the ones a
+      // short dock keeps expanded.
+      activatedAt: blankPanelMap(0),
+      activePanel: '',
+      activeSide: 'right',
+      dockWidth: { left: settings.dockLeftWidth, right: settings.dockRightWidth },
+      dragging: null,
+      dropHint: { side: 'right', index: 0 },
+      // Measured from the row the docks and the video share, not from the
+      // window: that row is what they are actually dividing up, and it is also
+      // the one that shrinks when the app goes fullscreen on a second monitor.
+      viewportWidth: 0,
+      dockHeight: 0,
+
+      fileContext: null,
       trim: { start: 0, end: 0 },
       canBrowse: canBrowseDirectories(),
       webCodecsOk: typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined'
@@ -231,6 +344,43 @@ export default {
         text: this.settings.overlayText,
         graphics: this.settings.overlayGraphics
       }
+    },
+
+    /** Open panels in dock order, popped-out ones included. */
+    openIds () {
+      return this.settings.panelOrder.filter((id) => this.panelOpen[id])
+    },
+    counts () {
+      return { left: this.dockIds('left').length, right: this.dockIds('right').length }
+    },
+    docks () {
+      return solveDocks({
+        viewportWidth: this.viewportWidth,
+        counts: this.counts,
+        widths: this.dockWidth,
+        activeSide: this.activeSide
+      })
+    },
+    /**
+     * Whether each panel is actually shown collapsed.
+     *
+     * Two reasons it might be: the viewer collapsed it, or the dock is too short
+     * to give every panel a usable body. In the second case the most recently
+     * used panels are the ones that stay open, which is what makes clicking a
+     * title bar feel like switching panels rather than fighting the layout.
+     */
+    collapsedMap () {
+      const out = blankPanelMap(false)
+      for (const side of SIDES) {
+        const ids = this.dockIds(side)
+        const limit = maxExpanded(this.dockHeight, ids.length)
+        const wanted = ids.filter((id) => !this.panelCollapsed[id])
+        const keep = new Set(
+          wanted.slice().sort((a, b) => this.activatedAt[b] - this.activatedAt[a]).slice(0, limit)
+        )
+        for (const id of ids) out[id] = this.panelCollapsed[id] || !keep.has(id)
+      }
+      return out
     }
   },
   watch: {
@@ -251,7 +401,17 @@ export default {
     'state.status' (status) {
       this.wakeUi()
       if (status === 'ready') this.onFileReady()
-      else if (status !== 'loading') this.closePanels()
+      else if (status !== 'loading') this.closeFilePanels()
+    },
+    'settings.matchAspect' (on) {
+      if (this.player) this.player.setMatchAspect(on)
+    },
+    // Docks change how much room the video has, so the canvas has to be
+    // re-measured whenever one appears, moves or is resized. The computed hands
+    // back a fresh object every time it re-runs, so no deep comparison is needed
+    // to notice -- and `resize()` itself early-outs when nothing moved.
+    docks () {
+      this.$nextTick(() => this.player && this.player.onResize())
     }
   },
   created () {
@@ -261,6 +421,9 @@ export default {
     this.lastPointerWasTouch = false
     this.uiVisibleBeforePointer = true
     this.keyboardNav = false
+    this.popWindows = {}
+    this.activateSeq = 0
+    this.resizeDrag = null
   },
   mounted () {
     this.player = new BvrPlayer({
@@ -270,6 +433,7 @@ export default {
       onNotice: (msg) => this.showNotice(msg)
     })
     this.player.streamMode = this.settings.streamMode
+    this.player.matchAspect = this.settings.matchAspect
     this.player.setVolume(this.settings.volume)
     if (this.settings.muted) this.player.toggleMute()
     this.player.setOverlay({
@@ -293,20 +457,31 @@ export default {
 
     this.ro = new ResizeObserver(() => this.player.onResize())
     this.ro.observe(this.$refs.stage)
+    this.dockRo = new ResizeObserver((records) => {
+      for (const r of records) this.measureBody(r.contentRect)
+    })
+    this.dockRo.observe(this.$refs.body)
+    this.measureBody(this.$refs.body.getBoundingClientRect())
     this.player.onResize()
 
     window.addEventListener('keydown', this.onKeyDown)
+    window.addEventListener('beforeunload', this.closeAllPopouts)
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
     window.addEventListener('beforeinstallprompt', this.onInstallPrompt)
+    // The dock stacks exist from here on, so a Teleport may safely look for one.
+    this.mounted = true
     this.consumeLaunchFiles()
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.onKeyDown)
+    window.removeEventListener('beforeunload', this.closeAllPopouts)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
     window.removeEventListener('beforeinstallprompt', this.onInstallPrompt)
     if (this.ro) this.ro.disconnect()
+    if (this.dockRo) this.dockRo.disconnect()
     if (this.view) this.view.detach()
     this.clearHideTimer()
+    this.closeAllPopouts()
     if (this.player) this.player.destroy()
   },
   methods: {
@@ -324,19 +499,23 @@ export default {
     async openFile (file) {
       this.notice = ''
       this.uiVisible = true
-      this.closePanels()
+      // The panels stay open across files now that they sit beside the video
+      // rather than over it -- reopening the inspector for every clip in a
+      // folder was only ever a consequence of it having been an overlay. Their
+      // context is dropped until the new index is built.
+      this.fileContext = null
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
     },
-    /** Fresh index, fresh trim range, and the contexts the panels read from. */
+    /** Fresh index, fresh trim range, and the context the panels read from. */
     onFileReady () {
       this.trim = { start: 0, end: this.state.duration }
-      this.exportContext = null
-      this.inspectContext = this.player.exportContext()
+      this.fileContext = this.player.exportContext()
       // A speed carried over from the last clip is more surprising than useful,
       // so each file starts at 1x however the last one was left.
       if (this.state.rate !== 1) this.player.setRate(1)
+      if (this.settings.autoplay) this.player.play()
     },
     async onLibraryOpen (clip) {
       try {
@@ -440,12 +619,260 @@ export default {
       if (this.view) this.view.reset()
     },
 
-    // ---------------------------------------------------------- panels
-    toggleMetadata () {
-      this.metadataOpen = !this.metadataOpen
-      if (this.metadataOpen) this.inspectContext = this.player.exportContext()
+    // ---------------------------------------------------------------- panels
+    panelTitle (id) { return (panelDef(id) || {}).title || id },
+    panelShort (id) { return (panelDef(id) || {}).short || id },
+    panelIcon (id) { return (panelDef(id) || {}).icon || 'layers' },
+    sideOf (id) { return this.settings.panelSides[id] === 'left' ? 'left' : 'right' },
+
+    /** Open, docked (not popped out) panels on one side, in dock order. */
+    dockIds (side) {
+      return this.openIds.filter((id) => !this.popTargets[id] && this.sideOf(id) === side)
+    },
+    panelOrderIn (id) {
+      return Math.max(0, this.dockIds(this.sideOf(id)).indexOf(id))
+    },
+    /**
+     * Where a panel's DOM belongs right now.
+     *
+     * A popped-out panel goes to its window; a docked one to its side's stack,
+     * which stays in the document even while that dock is a rail, so switching
+     * back costs nothing and the panel keeps its state.
+     */
+    panelTarget (id) {
+      if (!this.mounted) return null
+      if (this.popTargets[id]) return this.popTargets[id]
+      return `#dock-stack-${this.sideOf(id)}`
+    },
+    dockStyle (side) {
+      const d = this.docks[side]
+      if (d.mode === 'hidden') return { display: 'none' }
+      return { width: `${d.width}px` }
+    },
+
+    togglePanel (id) {
+      if (this.panelOpen[id]) this.closePanel(id)
+      else this.openPanel(id)
+    },
+    openPanel (id) {
+      const def = panelDef(id)
+      if (!def) return
+      if (def.needsFile && this.state.status !== 'ready') return
+      if (def.needsFile && !this.fileContext) this.fileContext = this.player.exportContext()
+      if (id === 'export' && this.trim.end <= this.trim.start) {
+        this.trim = { start: 0, end: this.state.duration }
+      }
+      this.panelOpen = { ...this.panelOpen, [id]: true }
+      this.panelCollapsed = { ...this.panelCollapsed, [id]: false }
+      this.activatePanel(id)
       this.wakeUi()
     },
+    closePanel (id) {
+      if (this.popTargets[id]) this.dockPanel(id)
+      this.panelOpen = { ...this.panelOpen, [id]: false }
+      if (this.activePanel === id) this.activePanel = ''
+      this.wakeUi()
+    },
+    /** Panels that describe the loaded recording; the settings panel survives. */
+    closeFilePanels () {
+      for (const p of PANELS) {
+        if (p.needsFile && this.panelOpen[p.id]) this.closePanel(p.id)
+      }
+      this.fileContext = null
+    },
+    /**
+     * Marks a panel as the one being worked in.
+     *
+     * Called from a capturing pointerdown on the whole panel, so it runs on
+     * every click inside one -- the early return is what keeps that from
+     * re-rendering the dock on each of them.
+     */
+    activatePanel (id) {
+      const popped = !!this.popTargets[id]
+      if (this.activePanel === id && (popped || this.activeSide === this.sideOf(id))) return
+      this.activatedAt = { ...this.activatedAt, [id]: ++this.activateSeq }
+      this.activePanel = id
+      if (!popped) this.activeSide = this.sideOf(id)
+    },
+    toggleCollapsed (id) {
+      const now = this.collapsedMap[id]
+      this.panelCollapsed = { ...this.panelCollapsed, [id]: !now }
+      // Expanding is also a request to be one of the panels that stays open.
+      if (now) this.activatePanel(id)
+    },
+    /** A rail button: bring that side forward and show the panel behind it. */
+    focusPanel (id) {
+      this.panelCollapsed = { ...this.panelCollapsed, [id]: false }
+      this.activatePanel(id)
+      this.activeSide = this.sideOf(id)
+    },
+    flipSide (id) {
+      const to = this.sideOf(id) === 'left' ? 'right' : 'left'
+      this.movePanel(id, to, this.dockIds(to).length)
+    },
+    /**
+     * Moves a panel to `side`, landing at `index` among the panels already
+     * there.
+     *
+     * One flat order is kept across both docks and each dock reads its own
+     * subsequence, so inserting before whoever currently holds that index puts
+     * the panel in the right place on the target side without disturbing the
+     * other one.
+     */
+    movePanel (id, side, index) {
+      const sides = { ...this.settings.panelSides, [id]: side }
+      const rest = this.settings.panelOrder.filter((x) => x !== id)
+      const onSide = rest.filter((x) =>
+        sides[x] === side && this.panelOpen[x] && !this.popTargets[x])
+      const before = onSide[index]
+      let order
+      if (before === undefined) {
+        order = [...rest, id]
+      } else {
+        const at = rest.indexOf(before)
+        order = [...rest.slice(0, at), id, ...rest.slice(at)]
+      }
+      this.patchSettings({ panelSides: sides, panelOrder: order })
+      this.activeSide = side
+      this.activatePanel(id)
+    },
+
+    // ------------------------------------------------------- panel dragging
+    onPanelDragStart (id) {
+      this.dragging = id
+      this.dropHint = { side: this.sideOf(id), index: this.panelOrderIn(id) }
+    },
+    onPanelDragMove (at) {
+      if (!this.dragging) return
+      this.dropHint = this.dropTargetAt(at.x, at.y)
+    },
+    onPanelDragEnd (at) {
+      const id = this.dragging
+      this.dragging = null
+      if (!id) return
+      const target = at ? this.dropTargetAt(at.x, at.y) : this.dropHint
+      this.movePanel(id, target.side, target.index)
+    },
+    /**
+     * Which dock, and how far down it, a pointer position means.
+     *
+     * The insertion point is read from where the panels actually are on screen
+     * rather than from the model, because CSS `order` decides that and only the
+     * layout knows the answer.
+     */
+    dropTargetAt (x, y) {
+      const row = this.$refs.body ? this.$refs.body.getBoundingClientRect() : { left: 0, width: this.viewportWidth }
+      const side = x < row.left + row.width / 2 ? 'left' : 'right'
+      let index = 0
+      const stack = document.getElementById(`dock-stack-${side}`)
+      if (stack && this.docks[side].mode === 'open') {
+        const tops = Array.from(stack.children)
+          .map((el) => el.getBoundingClientRect())
+          .filter((r) => r.height > 0)
+          .sort((a, b) => a.top - b.top)
+        index = tops.filter((r) => y > r.top + r.height / 2).length
+      }
+      return { side, index }
+    },
+
+    // -------------------------------------------------------- dock resizing
+    startResize (side, event) {
+      if (event.button !== undefined && event.button !== 0) return
+      event.preventDefault()
+      const el = event.currentTarget
+      this.resizeDrag = {
+        side,
+        id: event.pointerId,
+        el,
+        startX: event.clientX,
+        startWidth: this.docks[side].width
+      }
+      el.setPointerCapture(event.pointerId)
+      el.addEventListener('pointermove', this.onResizeMove)
+      el.addEventListener('pointerup', this.onResizeEnd)
+      el.addEventListener('pointercancel', this.onResizeEnd)
+    },
+    onResizeMove (event) {
+      const d = this.resizeDrag
+      if (!d || event.pointerId !== d.id) return
+      // The handle is on the inner edge, so a left dock grows as the pointer
+      // moves right and a right dock grows as it moves left.
+      const delta = (event.clientX - d.startX) * (d.side === 'left' ? 1 : -1)
+      const width = Math.min(MAX_DOCK, Math.max(MIN_DOCK, Math.round(d.startWidth + delta)))
+      this.dockWidth = { ...this.dockWidth, [d.side]: width }
+      this.activeSide = d.side
+    },
+    onResizeEnd (event) {
+      const d = this.resizeDrag
+      if (!d || event.pointerId !== d.id) return
+      this.resizeDrag = null
+      d.el.removeEventListener('pointermove', this.onResizeMove)
+      d.el.removeEventListener('pointerup', this.onResizeEnd)
+      d.el.removeEventListener('pointercancel', this.onResizeEnd)
+      if (d.el.hasPointerCapture && d.el.hasPointerCapture(d.id)) {
+        try { d.el.releasePointerCapture(d.id) } catch { /* pointer already gone */ }
+      }
+      // Written once, at the end, rather than on every pointer move.
+      this.patchSettings({
+        dockLeftWidth: this.dockWidth.left,
+        dockRightWidth: this.dockWidth.right
+      })
+    },
+    measureBody (rect) {
+      this.viewportWidth = Math.round(rect.width)
+      this.dockHeight = Math.round(rect.height)
+    },
+
+    // ------------------------------------------------------------- pop-outs
+    togglePop (id) {
+      if (this.popTargets[id]) this.dockPanel(id)
+      else this.popOut(id)
+    },
+    popOut (id) {
+      const def = panelDef(id)
+      const handle = openPanelWindow({
+        id,
+        title: `${def.title} — BVR Player`,
+        width: Math.max(360, Math.round(this.dockWidth[this.sideOf(id)]) + 24),
+        height: Math.min(900, Math.max(420, Math.round(window.innerHeight * 0.8))),
+        onClose: () => this.onPopClosed(id)
+      })
+      if (!handle) {
+        this.showNotice('The browser blocked the pop-out window. Allow pop-ups for this page to use it.')
+        return
+      }
+      this.popWindows[id] = handle
+      this.popTargets = { ...this.popTargets, [id]: handle.mount }
+      this.activatePanel(id)
+    },
+    /**
+     * The popup was closed from its own title bar.
+     *
+     * Deferred by a turn: this runs while that document is being torn down, and
+     * Vue has to move the panel's nodes back into the dock afterwards rather
+     * than into a document mid-unload.
+     */
+    onPopClosed (id) {
+      if (!this.popTargets[id]) return
+      setTimeout(() => this.dockPanel(id), 0)
+    },
+    dockPanel (id) {
+      if (!this.popTargets[id]) return
+      const handle = this.popWindows[id]
+      delete this.popWindows[id]
+      const next = { ...this.popTargets }
+      delete next[id]
+      this.popTargets = next
+      this.activatePanel(id)
+      closePanelWindow(handle)
+    },
+    closeAllPopouts () {
+      for (const id of Object.keys(this.popWindows)) closePanelWindow(this.popWindows[id])
+      this.popWindows = {}
+      if (Object.keys(this.popTargets).length) this.popTargets = {}
+    },
+
+    // ----------------------------------------------------------------- misc
     metadataAt (ms) {
       return this.player ? this.player.metadataAt(ms) : Promise.resolve(null)
     },
@@ -463,29 +890,11 @@ export default {
       }
       if (Object.keys(out).length) this.patchSettings(out)
     },
-    openExport () {
-      if (this.state.status !== 'ready') return
-      this.exportContext = this.player.exportContext()
-      if (!this.exportContext) return
-      if (this.trim.end <= this.trim.start) this.trim = { start: 0, end: this.state.duration }
-      this.exportOpen = true
-      this.wakeUi()
-    },
-    closeExport () {
-      this.exportOpen = false
-      this.wakeUi()
-    },
     onTrim (range) {
       this.trim = {
         start: Math.max(0, Math.min(range.start, this.state.duration)),
         end: Math.max(0, Math.min(range.end, this.state.duration))
       }
-    },
-    closePanels () {
-      this.exportOpen = false
-      this.metadataOpen = false
-      this.exportContext = null
-      this.inspectContext = null
     },
 
     // -------------------------------------------------------------- settings
@@ -544,7 +953,7 @@ export default {
     canHideUi () {
       if (!this.hasFile || this.state.status !== 'ready') return false
       if (this.menuOpen || this.scrubbing || this.pointerOverChrome) return false
-      if (this.libraryOpen || this.exportOpen || this.metadataOpen) return false
+      if (this.libraryOpen || this.dragging || this.resizeDrag) return false
       return !this.chromeHasKeyboardFocus()
     },
     /**
@@ -603,8 +1012,7 @@ export default {
       if (el && el.tagName === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) return
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
-      // A dialog owns the keyboard while it is up; only its own Escape applies.
-      if (this.exportOpen) return
+      // The folder browser covers the whole window; only its own Escape applies.
       if (this.libraryOpen) {
         if (event.key === 'Escape') { this.libraryOpen = false; event.preventDefault() }
         return
@@ -650,11 +1058,11 @@ export default {
           break
         case 'i':
         case 'I':
-          if (this.state.hasMetadata) this.toggleMetadata(); else handled = false
+          if (this.state.hasMetadata) this.togglePanel('metadata'); else handled = false
           break
         case 'e':
         case 'E':
-          this.openExport(); break
+          this.togglePanel('export'); break
         case '[':
           this.stepRate(-1); break
         case ']':
@@ -669,7 +1077,9 @@ export default {
         case '_':
           if (this.view) this.view.nudge(1 / 1.4); break
         case 'Escape':
-          if (this.metadataOpen) this.metadataOpen = false
+          // The panel most recently worked in is the one Escape means.
+          if (this.activePanel && this.panelOpen[this.activePanel]) this.closePanel(this.activePanel)
+          else if (this.openIds.length) this.closePanel(this.openIds[this.openIds.length - 1])
           else handled = false
           break
         default:
