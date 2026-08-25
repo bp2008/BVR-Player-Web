@@ -5,6 +5,7 @@
   --text-dim: #9aa4b2;
   --accent: #58a6ff;
   --danger: #ff7b72;
+  --warn: #d29922;
   /* Opaque, because a translucent field background is what a <select> hands to
      the browser for its native popup - and blended over white that reads as a
      light-theme control no matter what `color-scheme` says. */
@@ -389,6 +390,27 @@ body {
 
 .overlay__sub--wrap {
   overflow-wrap: anywhere;
+}
+
+/* Codec trouble found by the opening probe, shown while indexing carries on. */
+.overlay__warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 0 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(210, 153, 34, 0.42);
+  background: rgba(210, 153, 34, 0.12);
+  color: var(--warn);
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.overlay__warn > .icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
 }
 
 .progress {

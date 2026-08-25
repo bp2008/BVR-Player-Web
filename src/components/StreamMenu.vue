@@ -26,6 +26,7 @@
         role="menuitemradio"
         :aria-checked="opt.value === state.streamMode ? 'true' : 'false'"
         :disabled="opt.disabled"
+        :title="opt.title || null"
         @click="choose(opt)"
         @dblclick.stop
       >

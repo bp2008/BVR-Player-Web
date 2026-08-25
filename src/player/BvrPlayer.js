@@ -1,8 +1,8 @@
 import { BlobReader } from '../bvr/blobReader.js'
 import { parseFileHeader } from '../bvr/parseFileHeader.js'
 import { buildIndex, frameIndexForTime } from '../bvr/indexer.js'
-import { describeVideoCodec } from '../bvr/codec.js'
-import { buildPlaybackStream, estimateFrameInterval } from './playbackStream.js'
+import { probeVideoStreams, probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
+import { buildPlaybackStream, resolveStreamMode, estimateFrameInterval } from './playbackStream.js'
 import { VideoPipeline } from './VideoPipeline.js'
 import { AudioPipeline } from './AudioPipeline.js'
 import { MediaClock, performanceWall } from './MediaClock.js'
@@ -32,6 +32,7 @@ export class BvrPlayer {
     this.video = null
     this.audio = null
     this.codecInfo = null
+    this.probe = null
 
     this.streamMode = 'auto'
     this.frameIntervalMs = 33.367
@@ -83,6 +84,13 @@ export class BvrPlayer {
       startUtc: 0,
       currentUtc: 0,
       truncated: false,
+      mainCodecLabel: '',
+      subCodecLabel: '',
+      mainFourcc: '',
+      subFourcc: '',
+      mainCodecSupported: true,
+      subCodecSupported: true,
+      codecWarning: '',
       error: ''
     }
   }
@@ -106,6 +114,16 @@ export class BvrPlayer {
       this.header = await parseFileHeader(this.reader)
       if (gen !== this._generation) return
 
+      // Codec support is settled from the first key frames, before the scan that
+      // reads the rest of the file. A machine with no HEVC decoder should hear so
+      // in the first moment rather than after a gigabyte has gone past, and a
+      // file whose main stream cannot be decoded here may still have a sub
+      // stream that can.
+      this.probe = await probeVideoStreams(this.reader, this.header)
+      if (gen !== this._generation) return
+      this._emitProbe()
+      if (this.probe.decided && !this.probe.anySupported) throw new Error(this.probe.summary)
+
       this.index = await buildIndex(this.reader, this.header, {
         onProgress: (p) => { if (gen === this._generation) this._emit({ loadProgress: p }) },
         shouldStop: () => gen !== this._generation
@@ -115,6 +133,13 @@ export class BvrPlayer {
       if (this.index.streams[0].count === 0 && this.index.streams[1].count === 0) {
         throw new Error('This file contains no video frames.')
       }
+
+      // A stream whose frames start only later in the file was invisible to the
+      // opening probe; the index now points straight at its first key frame.
+      await this._probeMissedStreams()
+      if (gen !== this._generation) return
+      this._emitProbe()
+      if (!this.probe.anySupported) throw new Error(this.probe.summary)
 
       this.renderer.setOrientation(this.header.rotation, this.header.flipH)
 
@@ -150,18 +175,16 @@ export class BvrPlayer {
   async _selectStream (mode, initial) {
     const wasPlaying = this._state.playing
     const atTime = initial ? 0 : this.clock.currentTime
-    this.streamMode = mode
 
-    const pstream = buildPlaybackStream(this.index, this.header, mode)
+    const playable = [this._streamPlayable(0), this._streamPlayable(1)]
+    const effective = resolveStreamMode(this.index, playable, mode)
+    this.streamMode = effective
+
+    const pstream = buildPlaybackStream(this.index, this.header, effective, playable)
     if (pstream.count === 0) throw new Error('The selected stream contains no frames.')
 
-    // Take the codec description from the first key frame of the chosen stream.
-    const firstKey = pstream.keys.length ? pstream.keys[0] : 0
-    const keyBytes = await this.reader.readCopy(pstream.offset[firstKey], Math.min(pstream.size[firstKey], 1 << 16))
-    const codecInfo = describeVideoCodec(pstream.fourcc, keyBytes, {
-      width: pstream.width,
-      height: pstream.height
-    })
+    const codecInfo = this._codecFor(pstream)
+    if (!codecInfo) throw new Error('The selected stream could not be identified.')
     if (codecInfo.kind === 'unsupported') {
       throw new Error(`Unsupported video codec: ${codecInfo.label}. Browsers cannot decode this stream.`)
     }
@@ -187,14 +210,88 @@ export class BvrPlayer {
       height: pstream.height,
       videoLabel: codecInfo.label,
       fps: this.header.fps,
-      streamMode: mode,
+      streamMode: effective,
       streamLabel: pstream.streamLabel
     })
+
+    // On open the codec warning already explains this; only an explicit switch
+    // that could not be honoured needs saying out loud.
+    if (!initial && effective !== mode) {
+      this.onNotice(`The ${mode} stream cannot be decoded on this device \u2014 showing the ${pstream.streamLabel.toLowerCase()} instead.`)
+    }
 
     if (!initial) {
       await this._gotoIndex(frameIndexForTime(pstream, atTime))
       if (wasPlaying) this.play()
     }
+  }
+
+  /** Whether a source stream may be fed to the decoder; unprobed means "try it". */
+  _streamPlayable (si) {
+    const p = this.probe && this.probe.streams[si]
+    return p ? p.supported : true
+  }
+
+  /** The decoder configuration for a playback stream, from the probe. */
+  _codecFor (pstream) {
+    const probed = this.probe && this.probe.streams[pstream.codecSource]
+    if (!probed) return null
+    const info = probed.codec
+    if (info.kind !== 'video' || !pstream.variableResolution) return info
+    // A switching-mode sequence carries both resolutions; configure for the larger.
+    return {
+      ...info,
+      config: {
+        ...info.config,
+        codedWidth: pstream.width || undefined,
+        codedHeight: pstream.height || undefined
+      }
+    }
+  }
+
+  async _probeMissedStreams () {
+    let changed = false
+    for (let si = 0; si < 2; si++) {
+      const known = this.probe.streams[si]
+      if (this.index.streams[si].count === 0) continue
+      if (known && known.hasKeyFrame) continue
+      const info = await probeIndexedStream(this.reader, this.header, this.index, si)
+      if (info) { this.probe.streams[si] = info; changed = true }
+    }
+    if (changed) this.probe = summarizeProbe(this.probe.streams)
+  }
+
+  _emitProbe () {
+    const [main, sub] = this.probe.streams
+    const pick = (main && main.supported) ? main : (sub && sub.supported) ? sub : (main || sub)
+    this._emit({
+      hasMainStream: !!main,
+      hasSubStream: !!sub,
+      mainWidth: main ? main.width : (this.header.bmih[0]?.width || 0),
+      mainHeight: main ? main.height : (this.header.bmih[0]?.height || 0),
+      subWidth: sub ? sub.width : (this.header.bmih[1]?.width || 0),
+      subHeight: sub ? sub.height : (this.header.bmih[1]?.height || 0),
+      mainCodecLabel: main ? main.codec.label : '',
+      subCodecLabel: sub ? sub.codec.label : '',
+      mainFourcc: main ? main.fourcc : '',
+      subFourcc: sub ? sub.fourcc : '',
+      mainCodecSupported: main ? main.supported : true,
+      subCodecSupported: sub ? sub.supported : true,
+      codecWarning: this._codecWarning(),
+      videoLabel: pick ? pick.codec.label : '',
+      width: pick ? pick.width : 0,
+      height: pick ? pick.height : 0
+    })
+  }
+
+  _codecWarning () {
+    const p = this.probe
+    if (!p || !p.someUnsupported) return ''
+    const bad = p.streams.filter((s) => s && !s.supported)
+    const good = p.streams.filter((s) => s && s.supported)
+    const badList = bad.map((s) => `${s.name} (${s.codec.label})`).join(' and ')
+    return `This device cannot decode the ${badList} stream${bad.length > 1 ? 's' : ''}. ` +
+      `Playing the ${good.map((s) => s.name).join(' and ')} stream instead.`
   }
 
   _setupAudio () {
@@ -229,6 +326,7 @@ export class BvrPlayer {
     if (this.reader) { this.reader.release(); this.reader = null }
     this.header = null
     this.index = null
+    this.probe = null
     this.pstream = null
     this.curIdx = -1
     this.pendingSeek = null

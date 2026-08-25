@@ -39,6 +39,10 @@
           <p class="overlay__title">Indexing {{ state.fileName }}</p>
           <div class="progress"><div class="progress__bar" :style="{ width: (state.loadProgress * 100).toFixed(1) + '%' }"></div></div>
           <p class="overlay__sub">{{ (state.loadProgress * 100).toFixed(0) }}% of {{ formatBytes(state.fileSize) }}</p>
+          <p v-if="state.codecWarning" class="overlay__warn">
+            <AppIcon name="alert" :size="15" />
+            <span>{{ state.codecWarning }}</span>
+          </p>
         </div>
       </div>
 
@@ -173,6 +177,13 @@ export default {
         startUtc: 0,
         currentUtc: 0,
         truncated: false,
+        mainCodecLabel: '',
+        subCodecLabel: '',
+        mainFourcc: '',
+        subFourcc: '',
+        mainCodecSupported: true,
+        subCodecSupported: true,
+        codecWarning: '',
         error: ''
       },
       settings: loadSettings(),
@@ -198,6 +209,10 @@ export default {
         this.player.seek(0)
         this.player.play()
       }
+    },
+    'state.codecWarning' (msg) {
+      // The probe settles this before indexing finishes, so it lands early.
+      if (msg) this.showNotice(msg)
     },
     'state.playing' () {
       // Pausing no longer pins the chrome open; it re-arms the same idle timer.

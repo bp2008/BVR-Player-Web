@@ -76,7 +76,7 @@ Put `.bvr` files in `sample/` for local testing; that folder is git-ignored.
 ### How it works
 
 ```
-src/bvr/       format layer  - frame headers, file header, full-file index, codec ids
+src/bvr/       format layer  - frame headers, file header, full-file index, codec probe
 src/player/    playback      - decode pipelines, media clock, canvas renderer
 src/components/  Vue 3 UI (Options API)
 ```
@@ -86,9 +86,27 @@ src/components/  Vue 3 UI (Options API)
   Every seek is then exact and needs no searching. Corrupt regions are
   resynchronised by hunting for the next validated `BLUE` signature, and a
   truncated tail is played up to the last complete frame.
+
+  The scan is bounded by how fast the platform hands over bytes, not by anything
+  it computes, so reads run ahead of the parse: fixed 16 MB chunks are fetched
+  three deep, which keeps a queue outstanding at the storage layer instead of one
+  request at a time. Chunks overlap by 64 bytes so a frame header straddling a
+  boundary still reads whole, which keeps the per-frame loop free of stitching.
+  That is worth roughly 3x on an hour-long recording — about 0.6 s for 1.9 GB
+  here, against 1.6 s for a single sliding window — and the margin grows with
+  read latency, on a VM disk or a network share.
+- **Codec support, up front.** Before the index scan reads the rest of the file,
+  a short probe walks the first frames for each stream's first key frame and
+  settles what it is and whether this device can decode it. A machine with no
+  HEVC decoder finds out in milliseconds rather than after a gigabyte has gone
+  past. The two streams are judged separately: a file whose main stream cannot be
+  decoded here still plays from its sub stream, and the picker greys out only the
+  stream that has no decoder.
 - **Decoding.** Key frames carry their own parameter sets, so a
   `VideoDecoderConfig` is derived from the first key frame by parsing the SPS for
-  profile/tier/level. Chunks are fed to `VideoDecoder` in Annex-B form.
+  profile/tier/level. Chunks are fed to `VideoDecoder` in Annex-B form. Switching
+  mode merges main and sub into one sequence only when both go through the same
+  decoder — same codec, and both decodable here.
 - **Frame window.** Decoded pictures are copied into `ImageBitmap`s and kept in a
   window around the current position. The copy matters: a hardware decoder owns a
   small pool of output pictures and stalls once an application holds more than a
