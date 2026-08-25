@@ -1,7 +1,7 @@
 # BVR-Player-Web
 
 A web-based player for Blue Iris `.bvr` files. Everything runs locally in the
-browser — the file is never uploaded anywhere.
+browser.  Your files are never uploaded anywhere.
 
 ## Using it
 
@@ -34,9 +34,6 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Export to MP4 | download button | <kbd>E</kbd> |
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |
-
-Double-clicking the video resets the zoom when zoomed in, and toggles fullscreen
-otherwise.
 
 <kbd>Space</kbd> always means play/pause, whatever has keyboard focus at the
 time — a button you clicked a moment ago does not get a second click out of it.
