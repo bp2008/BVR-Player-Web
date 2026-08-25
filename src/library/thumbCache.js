@@ -147,3 +147,69 @@ export async function loadDirectoryHandle () {
 export async function forgetDirectoryHandle () {
   await run(HANDLES, 'readwrite', (store) => store.delete('lastDirectory'))
 }
+
+/**
+ * Folders that turned out to be ruinous to list.
+ *
+ * Starting a directory enumeration is not a decision that can be taken back:
+ * Chrome's browser process keeps working through it whatever the page does
+ * afterwards, and on a large folder over a network share that is an hour of
+ * every tab being unresponsive. So the one time it happens is recorded, and the
+ * folder is not listed again without being asked for.
+ *
+ * Keyed by name, which is all a directory handle offers. Two folders sharing a
+ * name only means one inherits the other's warning, and the warning has a way
+ * past it.
+ */
+const SLOW_KEY = (name) => `slow:${name || ''}`
+
+/**
+ * A folder's file names, so it need only be enumerated once.
+ *
+ * Enumerating is the expensive half of opening a folder and the half that gets
+ * dramatically worse when the disk underneath is busy, so it is exactly the part
+ * worth not repeating. Names are all that is kept -- everything else about a clip
+ * is read from the name or fetched when it scrolls into view -- which for six
+ * figures of recordings is a few megabytes.
+ *
+ * Stale listings are a matter of new recordings not appearing, which Refresh
+ * fixes, so this trades freshness for an opening that does not cost two minutes.
+ */
+const LISTING_KEY = (name) => `listing:${name || ''}`
+
+export async function saveListing (name, names) {
+  await run(HANDLES, 'readwrite', (store) =>
+    store.put({ names, savedAt: Date.now() }, LISTING_KEY(name)))
+}
+
+export async function loadListing (name) {
+  const record = await run(HANDLES, 'readonly', (store) => store.get(LISTING_KEY(name)))
+  return record && Array.isArray(record.names) ? record : null
+}
+
+export async function clearListing (name) {
+  await run(HANDLES, 'readwrite', (store) => store.delete(LISTING_KEY(name)))
+}
+
+// How long a "this folder listed slowly" note is worth keeping. A slow reading
+// usually means the disk was busy at that moment -- a camera writing a clip, say
+// -- rather than anything permanent about the folder, so the note expires.
+const SLOW_MEMO_MS = 24 * 60 * 60 * 1000
+
+export async function markSlowFolder (name, detail) {
+  await run(HANDLES, 'readwrite', (store) => store.put({ ...detail, at: Date.now() }, SLOW_KEY(name)))
+}
+
+export async function getSlowFolder (name) {
+  const record = await run(HANDLES, 'readonly', (store) => store.get(SLOW_KEY(name)))
+  if (!record) return null
+  if (Date.now() - (record.at || 0) > SLOW_MEMO_MS) {
+    clearSlowFolder(name)
+    return null
+  }
+  return record
+}
+
+export async function clearSlowFolder (name) {
+  await run(HANDLES, 'readwrite', (store) => store.delete(SLOW_KEY(name)))
+}

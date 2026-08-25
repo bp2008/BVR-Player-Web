@@ -38,31 +38,23 @@ export function displayCamera (camera) {
 }
 
 /**
- * Groups clips into calendar days in the viewer's own time zone, newest first,
- * which is how a day of recordings is actually read.
+ * The calendar day a clip belongs to, in the viewer's own time zone, as a plain
+ * integer so that two clips can be compared without building a key string for
+ * each one. A listing of six figures is regrouped on every keystroke in the
+ * filter box, and at that rate the difference between an integer compare and a
+ * string allocation is the difference between instant and not.
+ *
+ * -1 is "no date at all", which sorts before every real day and so lands at the
+ * end of a newest-first listing, where clips whose names say nothing belong.
  */
-export function groupByDay (clips) {
-  const days = new Map()
-  for (const clip of clips) {
-    const when = clip.startUtc || 0
-    const key = when ? dayKey(when) : 'unknown'
-    let bucket = days.get(key)
-    if (!bucket) {
-      bucket = { key, startUtc: when, label: when ? dayLabel(when) : 'Date unknown', clips: [] }
-      days.set(key, bucket)
-    }
-    bucket.clips.push(clip)
-    if (when && when < bucket.startUtc) bucket.startUtc = when
-  }
-  return [...days.values()].sort((a, b) => b.startUtc - a.startUtc)
-}
-
-function dayKey (utcMs) {
+export function dayIndex (utcMs) {
+  if (!utcMs) return -1
   const d = new Date(utcMs)
-  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
+  return d.getFullYear() * 512 + d.getMonth() * 32 + d.getDate()
 }
 
-function dayLabel (utcMs) {
+export function dayLabel (utcMs) {
+  if (!utcMs) return 'Date unknown'
   const d = new Date(utcMs)
   const today = new Date()
   const sameDay = (a, b) => a.getFullYear() === b.getFullYear() &&
@@ -81,15 +73,33 @@ export const SORTS = [
   { value: 'size-desc', label: 'Largest first' }
 ]
 
+/** Whether a sort orders clips by time, and so wants day headings. */
+export const isTimeSort = (sort) => sort === 'time-desc' || sort === 'time-asc'
+
+/** Whether a sort needs metadata the file name cannot supply. */
+export const needsFileSize = (sort) => sort === 'size-desc'
+
+// One collator, built once. `localeCompare` with options behind it has to
+// resolve those options on every call, and a six-figure listing is a couple of
+// million calls -- two seconds of frozen page, against a couple of hundred
+// milliseconds for the same comparisons through a collator that already exists.
+const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare
+const byText = new Intl.Collator().compare
+
+/**
+ * Orders a listing. Sorts in place -- the caller owns the array, and copying a
+ * six-figure listing on every sort is a cost with nothing to show for it.
+ */
 export function sortClips (clips, sort) {
-  const out = [...clips]
   const byTime = (a, b) => (a.startUtc || 0) - (b.startUtc || 0)
   switch (sort) {
-    case 'time-asc': out.sort(byTime); break
-    case 'name': out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })); break
-    case 'camera': out.sort((a, b) => a.camera.localeCompare(b.camera) || byTime(b, a)); break
-    case 'size-desc': out.sort((a, b) => b.size - a.size); break
-    default: out.sort((a, b) => byTime(b, a))
+    case 'time-asc': clips.sort(byTime); break
+    case 'name': clips.sort((a, b) => byName(a.name, b.name)); break
+    case 'camera': clips.sort((a, b) => byText(a.camera, b.camera) || byTime(b, a)); break
+    // A size nobody has read yet is -1, which lands these last rather than
+    // pretending they are empty files.
+    case 'size-desc': clips.sort((a, b) => b.size - a.size); break
+    default: clips.sort((a, b) => byTime(b, a))
   }
-  return out
+  return clips
 }

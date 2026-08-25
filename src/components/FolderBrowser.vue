@@ -3,12 +3,15 @@
     <header class="library__head">
       <AppIcon name="library" :size="20" />
       <h2 class="library__title">{{ dirName || 'Recordings' }}</h2>
-      <span v-if="entries.length" class="library__count">{{ filtered.length }} of {{ entries.length }}</span>
+      <span v-if="total" class="library__count">{{ countLabel }}</span>
+      <span v-if="listedAge" class="library__count library__count--age" :title="'Listed ' + listedAge + '. Refresh to look again.'">
+        · {{ listedAge }}
+      </span>
 
       <div class="library__spacer"></div>
 
       <input
-        v-if="entries.length"
+        v-if="total"
         v-model="query"
         class="library__search"
         type="search"
@@ -17,12 +20,12 @@
         @keydown.stop
       />
 
-      <select v-if="entries.length" class="settings__select" :value="sort" aria-label="Sort" @change="$emit('patch', { librarySort: $event.target.value })">
+      <select v-if="total" class="settings__select" :value="sort" aria-label="Sort" @change="$emit('patch', { librarySort: $event.target.value })">
         <option v-for="s in sorts" :key="s.value" :value="s.value">{{ s.label }}</option>
       </select>
 
       <button
-        v-if="entries.length"
+        v-if="total"
         type="button"
         class="ctl-btn ctl-btn--small"
         :title="view === 'grid' ? 'Switch to list' : 'Switch to grid'"
@@ -32,13 +35,13 @@
         <AppIcon :name="view === 'grid' ? 'list' : 'grid'" :size="18" />
       </button>
 
-      <button v-if="canRefresh" type="button" class="ctl-btn ctl-btn--small" title="Refresh" aria-label="Refresh" @click="refresh">
+      <button v-if="canRefresh" type="button" class="ctl-btn ctl-btn--small" title="Refresh" aria-label="Refresh" @click="refresh(true)">
         <AppIcon name="refresh" :size="18" />
       </button>
 
       <button type="button" class="btn btn--ghost" @click="choose">
         <AppIcon name="folder" :size="16" />
-        <span>{{ entries.length ? 'Change folder' : 'Choose folder' }}</span>
+        <span>{{ total ? 'Change folder' : 'Choose folder' }}</span>
       </button>
 
       <button type="button" class="ctl-btn ctl-btn--small" aria-label="Close" @click="$emit('close')">
@@ -46,16 +49,80 @@
       </button>
     </header>
 
-    <div class="library__body" ref="scroll">
-      <div v-if="loading" class="library__center">
+    <div v-if="task && (!loading || total)" class="library__task">
+      <span>{{ task.label }}</span>
+      <span class="library__bar"><span class="library__barfill" :style="{ width: taskPercent + '%' }"></span></span>
+      <span v-if="task.total" class="library__count">{{ count(task.done) }} of {{ count(task.total) }}</span>
+      <span v-else class="library__count">
+        {{ count(task.done) }} so far<span v-if="task.rate"> · {{ count(task.rate) }}/sec</span>
+      </span>
+      <button type="button" class="btn btn--ghost" @click="cancelScan">
+        {{ loading ? 'Stop' : 'Cancel' }}
+      </button>
+    </div>
+
+    <div class="library__body" ref="scroll" @scroll.passive="onScroll">
+      <div v-if="loading && !total" class="library__center">
         <div class="spinner"></div>
         <p>Reading {{ dirName }}…</p>
+        <p v-if="task" class="library__hint">
+          {{ count(task.done) }} recordings
+          <span v-if="task.scanned"> · {{ count(task.scanned) }} entries scanned</span>
+          <span v-if="task.rate"> · {{ count(task.rate) }}/sec</span>
+        </p>
+
+        <div v-if="scanIsSlow" class="library__stall">
+          <p class="library__hint library__hint--warn">
+            This folder is coming back at {{ count(task.rate) }} entries a second.
+          </p>
+          <p class="library__hint">
+            Chrome checks every entry against a safety list as it lists a folder, and over a
+            network share that check costs a round trip each time. On a folder with hundreds of
+            thousands of files that turns a one-second listing into an hour-long one, and it
+            happens inside the browser rather than in this page — which is also why the rest of
+            Chrome goes unresponsive while it runs.
+          </p>
+          <p class="library__hint">
+            Stopping here stops this page reading the results, but Chrome finishes the folder
+            regardless — the rest of the browser stays slow until it does. This folder will not
+            be listed again without being asked for.
+          </p>
+        </div>
+
+        <button type="button" class="btn" @click="cancelScan">
+          {{ scanIsSlow ? 'Stop' : 'Cancel' }}
+        </button>
       </div>
 
       <div v-else-if="error" class="library__center">
         <AppIcon name="alert" :size="30" />
         <p class="library__error">{{ error }}</p>
         <button type="button" class="btn" @click="choose">Choose a folder</button>
+      </div>
+
+      <div v-else-if="slowFolder" class="library__center">
+        <AppIcon name="alert" :size="30" />
+        <p class="library__lead">{{ dirName }} listed slowly last time</p>
+        <div class="library__stall">
+          <p class="library__hint">
+            It came back at <strong>{{ count(slowFolder.rate) }} entries a second</strong>, which
+            for a folder this size means minutes rather than seconds.
+          </p>
+          <p class="library__hint">
+            That is usually the disk being busy at that moment rather than anything about the
+            folder — a camera writing a clip to the same drive is enough to do it, and the same
+            folder often lists twenty times faster a minute later. Worth another go.
+          </p>
+          <p class="library__hint library__hint--warn">
+            If it is slow again, note that it cannot be called off once started: the work happens
+            inside Chrome rather than in this page, so closing the tab does not stop it. Quitting
+            Chrome does.
+          </p>
+        </div>
+        <div class="library__actions">
+          <button type="button" class="btn btn--accent" @click="refresh(true)">Try again</button>
+          <button type="button" class="btn" @click="choose">Choose another folder</button>
+        </div>
       </div>
 
       <div v-else-if="needsPermission" class="library__center">
@@ -68,7 +135,7 @@
         </div>
       </div>
 
-      <div v-else-if="!entries.length" class="library__center">
+      <div v-else-if="!total" class="library__center">
         <AppIcon name="library" :size="34" />
         <p class="library__lead">Browse a folder of recordings</p>
         <p class="library__hint">
@@ -85,25 +152,36 @@
         </p>
       </div>
 
-      <template v-else>
-        <p v-if="!filtered.length" class="library__center">Nothing matches “{{ query }}”.</p>
-        <section v-for="day in days" :key="day.key" class="library__day">
-          <h3 class="library__dayhead">
-            {{ day.label }}
-            <span class="library__daycount">{{ day.clips.length }}</span>
+      <p v-else-if="!matched" class="library__center">Nothing matches “{{ query }}”.</p>
+
+      <div v-else class="library__virt" :style="{ height: totalHeight + 'px' }">
+        <div
+          v-for="row in window"
+          :key="row.i"
+          class="library__row"
+          :class="row.head ? 'library__row--head' : (view === 'grid' ? 'library__row--items' : 'library__row--rows')"
+          :style="{ transform: `translateY(${row.top}px)` }"
+        >
+          <h3 v-if="row.head" class="library__dayhead">
+            {{ row.head }}
+            <span class="library__daycount">{{ count(row.count) }}</span>
           </h3>
-          <ul class="library__items" :class="view === 'grid' ? 'library__items--grid' : 'library__items--list'">
-            <li v-for="clip in day.clips" :key="clip.key">
+          <ul
+            v-else
+            class="library__items"
+            :class="view === 'grid' ? 'library__items--grid' : 'library__items--list'"
+            :style="gridStyle"
+          >
+            <li v-for="clip in row.clips" :key="clip.name">
               <button
                 type="button"
                 class="clip"
                 :class="{ 'clip--current': clip.name === currentName }"
-                :ref="(el) => observe(el, clip)"
                 @click="$emit('open', clip)"
               >
                 <span class="clip__shot">
-                  <img v-if="thumbs[clip.key] && thumbs[clip.key].thumbUrl" :src="thumbs[clip.key].thumbUrl" :alt="''" loading="lazy" />
-                  <span v-else-if="thumbs[clip.key]" class="clip__noshot">
+                  <img v-if="thumbOf(clip) && thumbOf(clip).thumbUrl" :src="thumbOf(clip).thumbUrl" :alt="''" />
+                  <span v-else-if="thumbOf(clip)" class="clip__noshot">
                     <AppIcon name="film" :size="22" />
                   </span>
                   <span v-else class="clip__pending"></span>
@@ -117,8 +195,8 @@
               </button>
             </li>
           </ul>
-        </section>
-      </template>
+        </div>
+      </div>
     </div>
 
     <input
@@ -136,13 +214,44 @@
 <script>
 import AppIcon from './AppIcon.vue'
 import { formatBytes, formatTime, formatUtc } from '../util/format.js'
-import { displayCamera, groupByDay, sortClips, SORTS } from '../library/bvrName.js'
+import { displayCamera, isTimeSort, needsFileSize, sortClips, SORTS } from '../library/bvrName.js'
+import { buildRows, columnsFor, measureRows, rowAt } from '../library/clipRows.js'
 import {
-  canBrowseDirectories, canPickDirectory, directoryPermission,
-  entriesFromFileList, listDirectory, pickDirectory
+  canBrowseDirectories, canPickDirectory, directoryPermission, entriesFromFileList,
+  entriesFromNames, hydrate, hydrateAll, isHydrated, listDirectory, releaseEntry
 } from '../library/directory.js'
 import { ThumbService } from '../library/thumbService.js'
-import { loadDirectoryHandle, saveDirectoryHandle } from '../library/thumbCache.js'
+import {
+  clearListing, clearSlowFolder, getSlowFolder, loadDirectoryHandle, loadListing,
+  markSlowFolder, saveDirectoryHandle, saveListing
+} from '../library/thumbCache.js'
+
+// Rows kept rendered beyond each edge of the viewport. Enough that a flick of
+// the wheel lands on something already in the document, few enough that a fast
+// scroll is not building rows nobody will see.
+const OVERSCAN = 3
+
+// Concurrent `getFile()` calls for clips that have just scrolled into view.
+// These are latency, not throughput -- over SMB a single one costs about as much
+// as a dozen overlapped.
+const STAT_WIDTH = 12
+
+// Typing quiet before the filter is applied. Long enough that a word typed at
+// speed is filtered once, short enough to feel like it happens as you type.
+const FILTER_DELAY = 120
+
+// `.library__body` side padding, which the grid has to fit inside.
+const BODY_PAD = 16
+
+// When to stop pretending a folder scan is nearly done. Below this many entries
+// a second, after this long, it is not slow -- it is not going to finish.
+// How often the growing listing is redrawn mid-scan. Each redraw re-sorts
+// everything arrived so far, so this trades a little of the scan's throughput
+// for a list that visibly fills rather than sitting behind a spinner.
+const PROGRESS_RENDER_MS = 1000
+
+const SLOW_AFTER_MS = 12000
+const SLOW_RATE = 400
 
 export default {
   name: 'FolderBrowser',
@@ -155,36 +264,76 @@ export default {
   emits: ['close', 'open', 'patch', 'notice', 'folder'],
   data () {
     return {
-      entries: [],
-      thumbs: {},
       dirName: '',
       dirHandle: null,
       loading: false,
       error: '',
       needsPermission: null,
+      // Set when this folder has already been found ruinous to list, which is
+      // the one thing worth remembering about a folder.
+      slowFolder: null,
+      // When the listing on screen came out of the cache rather than the disk.
+      listedAt: 0,
+      // A directory walk is in progress. Names keep arriving; nothing else about
+      // the folder can be read until it ends.
+      scanning: false,
       query: '',
+      // A long-running read, either of the folder itself or of the metadata a
+      // sort needs. Null when nothing is going on.
+      task: null,
+      total: 0,
+      matched: 0,
+      // Only these three describe what is on screen. The listing itself is not
+      // reactive -- see `created`.
+      columns: 1,
+      totalHeight: 0,
+      window: [],
+      // Bumped when a thumbnail or a file size arrives, which is what makes the
+      // rendered window pick them up without the listing being reactive.
+      tick: 0,
       sorts: SORTS,
       supported: canBrowseDirectories()
     }
   },
   computed: {
     canRefresh () { return !!this.dirHandle },
-    filtered () {
-      const q = this.query.trim().toLowerCase()
-      if (!q) return this.entries
-      return this.entries.filter((e) =>
-        e.name.toLowerCase().includes(q) || e.camera.toLowerCase().includes(q))
-    },
-    days () {
-      const sorted = sortClips(this.filtered, this.sort)
-      // Only the time-ordered views group by day; sorting by name or size is a
-      // request to see one flat list in that order.
-      if (this.sort !== 'time-desc' && this.sort !== 'time-asc') {
-        return [{ key: 'all', label: 'All recordings', clips: sorted }]
+    countLabel () {
+      if (this.query.trim() && this.matched !== this.total) {
+        return `${this.count(this.matched)} of ${this.count(this.total)}`
       }
-      const groups = groupByDay(sorted)
-      if (this.sort === 'time-asc') groups.reverse()
-      return groups
+      return this.count(this.total)
+    },
+    /** How old the listing on screen is, when it came from the cache. */
+    listedAge () {
+      if (!this.listedAt || !this.total) return ''
+      const mins = Math.floor((Date.now() - this.listedAt) / 60000)
+      if (mins < 2) return ''
+      if (mins < 60) return `listed ${mins} min ago`
+      const hours = Math.round(mins / 60)
+      if (hours < 24) return `listed ${hours} h ago`
+      return `listed ${Math.round(hours / 24)} d ago`
+    },
+    taskPercent () {
+      if (!this.task || !this.task.total) return 0
+      return Math.round((this.task.done / this.task.total) * 100)
+    },
+    /**
+     * Whether this folder is listing so slowly that saying so is kinder than
+     * leaving a spinner up.
+     *
+     * Chrome checks every directory entry against a safety list as it iterates,
+     * and on a network share that check is a round trip each time -- tens of
+     * milliseconds per entry, against a fraction of one locally. A folder with
+     * six figures of files in it then takes not minutes but hours, and no amount
+     * of care on this side of the API changes that.
+     */
+    scanIsSlow () {
+      const t = this.task
+      return !!(this.loading && t && t.rate && t.elapsed > SLOW_AFTER_MS && t.rate < SLOW_RATE)
+    },
+    gridStyle () {
+      if (this.view !== 'grid') return null
+      return { gridTemplateColumns: `repeat(${this.columns}, minmax(0, 1fr))` }
     }
   },
   watch: {
@@ -193,33 +342,78 @@ export default {
     // has clicked anything.
     dirHandle (handle) {
       this.$emit('folder', handle || null)
+    },
+    sort () { this.applySort() },
+    // Remembered the moment it is known, rather than at the end: the end of a
+    // scan like this one may be an hour away, and the page may be long gone.
+    scanIsSlow (slow) {
+      if (slow && this.task) {
+        markSlowFolder(this.dirName, { rate: this.task.rate, scanned: this.task.scanned })
+      }
+    },
+    view () { this.relayout() },
+    query () {
+      clearTimeout(this.filterTimer)
+      this.filterTimer = setTimeout(() => this.applyFilter(), FILTER_DELAY)
     }
   },
   created () {
     this.service = new ThumbService()
-    // Not reactive: the observer and its element map only ever drive requests.
-    this.observer = null
-    this.watched = new Map()
+
+    // None of this is reactive, deliberately. A folder can hold a hundred
+    // thousand recordings, and handing that array to Vue would mean a proxy per
+    // entry and a dependency per field read -- paid on every scroll, for rows
+    // that are not even in the document. What the template renders is `window`,
+    // which is a couple of dozen rows; everything else is plain data that the
+    // component recomputes itself and republishes through `window` and `tick`.
+    this.all = []          // every recording in the folder, in sorted order
+    this.clips = []        // the ones the filter box lets through, same order
+    this.rows = []         // headings and grid lines, flat
+    this.offsets = null    // where each row sits, cumulative
+    this.range = { first: -1, last: -1 }
+    this.metrics = { head: 46, item: 220 }
+    this.metricSig = ''
+    this.wanted = new Map() // name -> clip, for everything currently on screen
+    this.statActive = 0
+    this.hydratedAll = false
+    // Two scans, two scopes. Reading the folder and reading every file's size
+    // are both cancellable and both long, but one must never cancel the other:
+    // changing the sort while a folder is still listing would otherwise abandon
+    // the listing.
+    this.scanCtl = null
+    this.sizeCtl = null
+    this.filterTimer = 0
+    this.scrollPending = false
+    this.tickPending = false
   },
   async mounted () {
-    this.observer = new IntersectionObserver((records) => this.onVisible(records), {
-      root: this.$refs.scroll,
-      // Start a row before it arrives, so a thumbnail is usually there already.
-      rootMargin: '320px 0px'
-    })
+    // A resize that only changed the height leaves every row where it was;
+    // only a change of width can move anything.
+    this.resizeObserver = new ResizeObserver(() => this.relayout(false))
+    this.resizeObserver.observe(this.$refs.scroll)
     await this.restore()
   },
   beforeUnmount () {
-    if (this.observer) this.observer.disconnect()
+    clearTimeout(this.filterTimer)
+    if (this.resizeObserver) this.resizeObserver.disconnect()
+    this.cancelScan()
     this.service.dispose()
   },
   methods: {
     formatBytes,
     formatTime,
     displayCamera,
+    count (n) { return Number(n || 0).toLocaleString() },
+    /** What has been learned by opening the clip, as opposed to reading its name. */
     info (clip) {
-      const t = this.thumbs[clip.key]
+      const t = this.thumbOf(clip)
       return (t && t.info) || {}
+    },
+    thumbOf (clip) {
+      // Reading `tick` is what subscribes this render to results arriving; the
+      // service's own store is a plain Map.
+      void this.tick
+      return clip.key ? this.service.get(clip.key) : null
     },
     clipTime (clip) {
       const known = this.info(clip).startUtc || clip.startUtc
@@ -232,7 +426,7 @@ export default {
       if (i.width) bits.push(`${i.width}×${i.height}`)
       if (i.fourcc) bits.push(i.fourcc)
       if (i.hasAudio) bits.push('audio')
-      bits.push(formatBytes(clip.size))
+      if (isHydrated(clip)) bits.push(formatBytes(clip.size))
       return bits.join(' · ')
     },
 
@@ -271,20 +465,19 @@ export default {
         this.$refs.dirInput.click()
         return
       }
+      let picked = null
       try {
-        this.loading = true
-        const { name, handle, entries } = await pickDirectory()
-        this.dirHandle = handle
-        this.dirName = name
-        this.setEntries(entries)
-        saveDirectoryHandle(handle)
+        picked = await window.showDirectoryPicker({ id: 'bvr-clips', mode: 'read' })
       } catch (e) {
-        if (e && e.name === 'AbortError') { this.loading = false; return }
+        if (e && e.name === 'AbortError') return
         // A browser that has the picker but refuses it here still has the input.
         this.$refs.dirInput.click()
-      } finally {
-        this.loading = false
+        return
       }
+      this.dirHandle = picked
+      this.dirName = picked.name
+      saveDirectoryHandle(picked)
+      await this.refresh()
     },
     onDirInput (event) {
       const files = event.target.files
@@ -302,52 +495,352 @@ export default {
       const path = files[0] && files[0].webkitRelativePath
       return path ? path.split('/')[0] : 'Selected folder'
     },
-    async refresh () {
+    /**
+     * Puts a listing on screen, from the cache when there is one.
+     *
+     * `force` is Refresh, and the way past both the cache and the note about
+     * this folder having been slow.
+     */
+    async refresh (force = false) {
       if (!this.dirHandle) return
+      if (!force) {
+        const cached = await loadListing(this.dirName)
+        if (cached && cached.names.length) {
+          // Enumerating is the expensive part and it has already been paid for.
+          this.slowFolder = null
+          this.listedAt = cached.savedAt || 0
+          this.setEntries(entriesFromNames(cached.names, this.dirHandle))
+          return
+        }
+        // Asked before anything is started, because once an enumeration is
+        // under way there is no calling it back.
+        this.slowFolder = await getSlowFolder(this.dirName)
+        if (this.slowFolder) return
+      }
+      this.slowFolder = null
+      this.listedAt = 0
+      await clearSlowFolder(this.dirName)
+      const signal = this.newScan()
       this.loading = true
+      this.scanning = true
+      this.lastProgressRender = 0
       this.error = ''
+      this.task = { label: 'Reading folder…', done: 0, total: 0 }
       try {
-        this.setEntries(await listDirectory(this.dirHandle))
-        if (!this.entries.length) this.error = 'That folder holds no .bvr recordings.'
+        const entries = await listDirectory(this.dirHandle, {
+          signal,
+          onProgress: (p) => {
+            this.task = {
+              label: 'Reading folder…',
+              done: p.kept,
+              total: 0,
+              scanned: p.scanned,
+              elapsed: p.elapsed,
+              rate: p.elapsed > 400 ? Math.round(p.scanned / (p.elapsed / 1000)) : 0
+            }
+            this.showProgress(p.entries)
+          }
+        })
+        this.setEntries(entries)
+        if (entries.length) {
+          this.listedAt = Date.now()
+          saveListing(this.dirName, entries.map((e) => e.name))
+        } else {
+          this.error = 'That folder holds no .bvr recordings.'
+          clearListing(this.dirName)
+        }
       } catch (e) {
-        this.error = `Could not read the folder: ${e.message}`
+        // A cancelled scan is a choice, not a failure; it just leaves nothing.
+        if (e && e.name === 'AbortError') this.setEntries([])
+        else this.error = `Could not read the folder: ${(e && e.message) || e}`
       } finally {
         this.loading = false
+        this.scanning = false
+        this.task = null
+        // Reading anything about a clip was pointless until now; this is the
+        // moment it becomes possible.
+        this.pump()
       }
     },
+    /**
+     * Puts what has arrived so far on screen, while the rest is still coming.
+     *
+     * Only the names are available during a scan -- sizes, durations and
+     * thumbnails all need `getFileHandle`, and that blocks until the walk ends
+     * (measured: 48 s on a 223,000-entry folder, exactly one full pass). So this
+     * is a list to read and search, not yet one to play from, and re-sorting a
+     * six-figure array is not something to do on every batch either.
+     */
+    showProgress (entries) {
+      if (!entries || !entries.length) return
+      const now = Date.now()
+      if (now - (this.lastProgressRender || 0) < PROGRESS_RENDER_MS) return
+      this.lastProgressRender = now
+      this.all = entries
+      this.total = entries.length
+      sortClips(this.all, this.sort)
+      // Never yanks the view back to the top: someone may be reading it.
+      this.applyFilter(false)
+    },
+    /** Replaces any listing in flight, and hands back the signal for the new one. */
+    newScan () {
+      if (this.scanCtl) this.scanCtl.abort()
+      this.scanCtl = new AbortController()
+      return this.scanCtl.signal
+    },
+    /** The same, for the bulk metadata pass. Only ever one of the two is live. */
+    newSizeScan () {
+      if (this.sizeCtl) this.sizeCtl.abort()
+      this.sizeCtl = new AbortController()
+      return this.sizeCtl.signal
+    },
+    cancelScan () {
+      if (this.scanCtl) this.scanCtl.abort()
+      if (this.sizeCtl) this.sizeCtl.abort()
+    },
     setEntries (entries) {
-      this.watched.clear()
-      if (this.observer) this.observer.disconnect()
-      this.entries = entries
+      // Whatever a metadata pass was filling in, it was filling in the listing
+      // that is being replaced.
+      if (this.sizeCtl) this.sizeCtl.abort()
+      this.all = entries
+      this.total = entries.length
+      // Whether anything is left to fill in later, asked of the listing rather
+      // than assumed from where it came: a small folder is read whole up front,
+      // and the `webkitdirectory` route has every size in hand whatever its
+      // size. `every` stops at the first unread entry, which in a lazy listing
+      // is the first one.
+      this.hydratedAll = entries.every(isHydrated)
+      this.wanted.clear()
       this.error = ''
-      // Results already gathered stay valid -- the cache is keyed on identity,
-      // not on position in a listing.
-      this.thumbs = { ...this.thumbs }
+      this.applySort()
+    },
+
+    // -------------------------------------------------------------- the listing
+    /**
+     * Orders the whole listing, once.
+     *
+     * Doing it here rather than per keystroke is the point: the filter is a
+     * subset of an array that is already in order, so typing never re-sorts.
+     */
+    async applySort () {
+      if (needsFileSize(this.sort)) await this.readAllSizes()
+      sortClips(this.all, this.sort)
+      this.applyFilter()
+    },
+    /**
+     * Sorting by size is the one view that wants something no file name can
+     * say, for clips nobody has looked at. It is the only thing that brings back
+     * the per-file round trip the listing exists to avoid, so it is done once,
+     * on request, with a progress bar and a way out.
+     */
+    async readAllSizes () {
+      if (this.hydratedAll || !this.all.length) return
+      const signal = this.newSizeScan()
+      const label = 'Reading file sizes…'
+      this.task = { label, done: 0, total: this.all.length }
+      try {
+        await hydrateAll(this.all, {
+          signal,
+          onProgress: (done, total) => { this.task = { label, done, total }; this.bump() }
+        })
+        this.hydratedAll = true
+      } catch {
+        // Cancelled: sort on whatever was read, which is the honest answer.
+      } finally {
+        this.task = null
+      }
+    },
+    applyFilter (resetScroll = true) {
+      const q = this.query.trim().toLowerCase()
+      // `search` is the name pre-lowered at listing time, and the camera is a
+      // slice of the name, so one `includes` covers both.
+      this.clips = q ? this.all.filter((e) => e.search.includes(q)) : this.all
+      this.matched = this.clips.length
+      // A different set of results is a different list, and the top of it is
+      // what was asked for. Left alone, the browser only clamps the scroll
+      // position to the new bottom, which lands on the oldest match.
+      if (resetScroll && this.$refs.scroll) this.$refs.scroll.scrollTop = 0
+      this.relayout()
+    },
+
+    // ------------------------------------------------------------ the geometry
+    /**
+     * Rebuilds the row model and everything downstream of it.
+     *
+     * Called whenever what is being shown changes shape: a new listing, a new
+     * filter, a different sort or view, or the window being resized.
+     */
+    relayout (force = true) {
+      const el = this.$refs.scroll
+      if (!el) return
+      const width = Math.max(0, el.clientWidth - BODY_PAD * 2)
+      if (!width) return
+      const columns = columnsFor(width, this.view)
+      const sig = `${this.view}:${columns}:${Math.round(width)}`
+      // Nothing about the shape of a row changed and the listing is the one the
+      // rows were built from, so there is nothing to rebuild.
+      if (sig === this.metricSig && !force) { this.updateWindow(); return }
+
+      this.columns = columns
+      // Row heights come out of the stylesheet, not out of here, so this is only
+      // a first guess -- `calibrate` replaces it with what was actually laid out.
+      if (sig !== this.metricSig) {
+        this.metricSig = sig
+        this.metrics = { head: 46, item: this.estimateRow(width) }
+      }
+
+      this.rows = buildRows(this.clips, { grouped: isTimeSort(this.sort), columns: this.columns })
+      this.applyMetrics()
+      this.$nextTick(() => this.calibrate(0))
+    },
+    estimateRow (width) {
+      if (this.view !== 'grid') return 96
+      const gap = 12
+      const col = (width - gap * (this.columns - 1)) / this.columns
+      // A 4:3 still, the gap under it, and three lines of caption.
+      return Math.round(col * 0.75) + 8 + 50 + gap
+    },
+    applyMetrics () {
+      this.offsets = measureRows(this.rows, this.metrics.head, this.metrics.item)
+      this.totalHeight = this.offsets[this.rows.length]
+      this.range.first = -1
+      this.updateWindow()
+    },
+    /**
+     * Replaces the guessed row heights with the real ones.
+     *
+     * Nothing here knows what a caption line or a heading actually measures --
+     * that is the stylesheet's business, and it changes with the font the
+     * viewer's browser picked. So the first rows to be laid out are measured and
+     * the scroll height corrected, keeping whatever was at the top at the top.
+     */
+    calibrate (attempt) {
+      const el = this.$refs.scroll
+      if (!el || !this.rows.length) return
+      const item = el.querySelector('.library__row--items, .library__row--rows')
+      const head = el.querySelector('.library__row--head')
+      let changed = false
+      if (item && Math.abs(item.offsetHeight - this.metrics.item) > 0.5) {
+        this.metrics.item = item.offsetHeight
+        changed = true
+      }
+      if (head && Math.abs(head.offsetHeight - this.metrics.head) > 0.5) {
+        this.metrics.head = head.offsetHeight
+        changed = true
+      }
+      if (!changed) return
+      const anchor = Math.max(0, this.range.first)
+      this.applyMetrics()
+      this.$nextTick(() => {
+        if (anchor > 0 && this.offsets) el.scrollTop = this.offsets[anchor]
+        this.updateWindow()
+        // A corrected height can bring a differently-sized row into view; two
+        // more passes settle it, and it converges long before that in practice.
+        if (attempt < 2) this.$nextTick(() => this.calibrate(attempt + 1))
+      })
+    },
+    onScroll () {
+      // One recompute per frame however many scroll events the browser sends.
+      if (this.scrollPending) return
+      this.scrollPending = true
+      requestAnimationFrame(() => {
+        this.scrollPending = false
+        this.updateWindow()
+      })
+    },
+    /** Works out which rows the viewport covers, and renders exactly those. */
+    updateWindow () {
+      const el = this.$refs.scroll
+      if (!el || !this.offsets || !this.rows.length) {
+        this.window = []
+        this.range.first = this.range.last = -1
+        return
+      }
+      const top = Math.max(0, el.scrollTop)
+      const first = Math.max(0, rowAt(this.offsets, top) - OVERSCAN)
+      const last = Math.min(this.rows.length - 1, rowAt(this.offsets, top + el.clientHeight) + OVERSCAN)
+      if (first === this.range.first && last === this.range.last) return
+      this.range.first = first
+      this.range.last = last
+
+      const out = []
+      for (let i = first; i <= last; i++) {
+        const row = this.rows[i]
+        if (row.head) out.push({ i, head: row.head, count: row.count, top: this.offsets[i] })
+        else out.push({ i, head: '', top: this.offsets[i], clips: this.clips.slice(row.start, row.end) })
+      }
+      this.window = out
+      this.pump()
     },
 
     // -------------------------------------------------------------- thumbnails
-    observe (el, clip) {
-      if (!el || !this.observer) return
-      if (this.watched.get(el) === clip.key) return
-      this.watched.set(el, clip.key)
-      el.dataset.key = clip.key
-      this.observer.observe(el)
+    /**
+     * Points the thumbnail machinery at what is on screen and away from what is
+     * not.
+     *
+     * With only the visible rows in the document there is no need to ask the
+     * layout engine what is visible -- the window *is* the answer, and it is
+     * already computed.
+     */
+    pump () {
+      const next = new Map()
+      for (const row of this.window) {
+        if (!row.clips) continue
+        for (const clip of row.clips) next.set(clip.name, clip)
+      }
+      for (const [name, clip] of this.wanted) {
+        if (next.has(name)) continue
+        if (clip.key) this.service.cancel(clip.key)
+        // Whatever this clip made the browser process hold, it no longer needs
+        // to hold. The picture itself is kept -- that is the service's cache,
+        // and it lives in this process.
+        releaseEntry(clip)
+      }
+      this.wanted = next
+      this.fill()
     },
-    onVisible (records) {
-      for (const record of records) {
-        const key = record.target.dataset.key
-        const clip = this.entries.find((e) => e.key === key)
-        if (!clip) continue
-        if (record.isIntersecting) this.load(clip)
-        else if (!this.thumbs[key]) this.service.cancel(key)
+    /**
+     * Starts work for visible clips, up to the concurrency bound.
+     *
+     * Each pass reads the *current* window, so scrolling past a screenful
+     * abandons it rather than queueing it: whatever has not been started yet is
+     * simply never picked.
+     */
+    fill () {
+      // Every one of these would queue behind the directory walk and land in a
+      // heap when it finished. Nothing is gained by asking early.
+      if (this.scanning) return
+      for (const clip of this.wanted.values()) {
+        if (isHydrated(clip)) { this.want(clip); continue }
+        if (clip.statPromise) continue
+        if (this.statActive >= STAT_WIDTH) return
+        this.statActive++
+        hydrate(clip)
+          .then(() => {
+            // The size now shows in the caption, and there is finally a cache
+            // key to ask for a picture with.
+            this.bump()
+            // A stat that lands after its clip has scrolled away arrives too
+            // late for `pump` to have released it -- there was nothing to
+            // release when it looked. It has to be done here or not at all.
+            if (this.wanted.has(clip.name)) this.want(clip)
+            else releaseEntry(clip)
+          })
+          .finally(() => { this.statActive--; this.fill() })
       }
     },
-    async load (clip) {
-      if (this.thumbs[clip.key]) return
-      const result = await this.service.request(clip)
-      if (!result) return
-      // Replacing the object is what tells Vue a key was filled in.
-      this.thumbs = { ...this.thumbs, [clip.key]: result }
+    want (clip) {
+      if (!clip.key || this.service.get(clip.key)) return
+      this.service.request(clip).then((result) => {
+        if (result) this.bump()
+        if (!this.wanted.has(clip.name)) releaseEntry(clip)
+      })
+    },
+    /** One re-render a frame, however many results land in it. */
+    bump () {
+      if (this.tickPending) return
+      this.tickPending = true
+      requestAnimationFrame(() => { this.tickPending = false; this.tick++ })
     }
   }
 }
@@ -387,6 +880,7 @@ export default {
   color: var(--text-dim);
   font-size: 12px;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .library__spacer {
@@ -410,11 +904,37 @@ export default {
   outline-offset: 1px;
 }
 
+.library__task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.library__bar {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.library__barfill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
 .library__body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px 32px;
+  padding: 0 16px 28px;
 }
 
 .library__center {
@@ -466,15 +986,46 @@ export default {
   gap: 8px;
 }
 
-.library__day + .library__day {
-  margin-top: 20px;
+.library__count--age {
+  opacity: 0.72;
 }
+
+.library__stall {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px;
+  border-radius: 9px;
+  border: 1px solid rgba(227, 179, 65, 0.35);
+  background: rgba(227, 179, 65, 0.07);
+  text-align: left;
+}
+
+/*
+ * The full height of the listing, with only the rows on screen inside it. Each
+ * row carries the space below it in its own padding, so a row's offset is the
+ * plain sum of the heights before it and nothing has to account for gaps.
+ */
+.library__virt {
+  position: relative;
+}
+
+.library__row {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+}
+
+.library__row--head { padding: 16px 0 9px; }
+.library__row--items { padding-bottom: 12px; }
+.library__row--rows { padding-bottom: 5px; }
 
 .library__dayhead {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 9px;
+  margin: 0;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.6px;
@@ -487,6 +1038,7 @@ export default {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.09);
   letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .library__items {
@@ -598,15 +1150,23 @@ export default {
   color: #e8eaed;
 }
 
+/*
+ * A fixed height, not a natural one. The virtual list works out where every row
+ * it is not rendering sits from the height of one it is, so a caption that grew
+ * a line because a camera name wrapped would put every offset below it out.
+ */
 .clip__meta {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
+  height: 50px;
+  overflow: hidden;
 }
 
 .clip__camera {
   font-size: 13px;
+  line-height: 18px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -616,12 +1176,18 @@ export default {
 .clip__time {
   color: var(--text-dim);
   font-size: 12px;
+  line-height: 16px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .clip__detail {
   color: var(--text-dim);
   font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .clip:focus-visible {
@@ -636,6 +1202,5 @@ export default {
 @media (max-width: 620px) {
   .library__title { max-width: 46vw; }
   .library__search { width: 100%; order: 5; }
-  .library__items--grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
 }
 </style>

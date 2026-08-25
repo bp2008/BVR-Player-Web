@@ -16,9 +16,19 @@ import { openEntry } from './directory.js'
  * newest request is served first, because in a scrolling grid it is the one the
  * user is looking at. Requests for rows that have scrolled away are cancelled
  * outright.
+ *
+ * Finished results are kept, but only a windowful of them: each carries an
+ * object URL, and a folder of a hundred thousand clips is a folder somebody can
+ * scroll past a hundred thousand object URLs in. The oldest are revoked once the
+ * bound is passed, which costs at most an IndexedDB read if that clip is scrolled
+ * back to.
  */
 
 const OPTIONS = { maxWidth: THUMB_WIDTH, maxHeight: THUMB_HEIGHT }
+
+// Live results to keep, in clips. Comfortably more than any window holds, so
+// scrolling back a few screens still finds its pictures in memory.
+const MAX_RESULTS = 600
 
 // A worker per couple of cores, capped: the work is decode-bound and more
 // concurrent hardware decoder sessions do not make the GPU faster.
@@ -68,6 +78,9 @@ class WorkerSlot {
 export class ThumbService {
   constructor () {
     this.queue = []
+    // Key -> queued job, so a cancel is a lookup rather than a scan of the
+    // queue. Cancelled jobs are left in the stack and skipped when popped.
+    this.jobs = new Map()
     this.active = 0
     this.slots = []
     this.workersUsable = true
@@ -101,9 +114,9 @@ export class ThumbService {
    * no picture could be made.
    */
   request (entry) {
-    const cached = this.results.get(entry.key)
+    const cached = this.get(entry.key)
     if (cached) return Promise.resolve(cached)
-    const existing = this.queue.find((job) => job.entry.key === entry.key)
+    const existing = this.jobs.get(entry.key)
     if (existing) return existing.promise
 
     const job = { entry, cancelled: false }
@@ -111,15 +124,28 @@ export class ThumbService {
       job.resolve = resolve
       job.reject = reject
     })
+    this.jobs.set(entry.key, job)
     this.queue.push(job)
     this._pump()
     return job.promise
   }
 
+  /**
+   * A finished result, if one is still in memory.
+   *
+   * A plain read: this is called from a render, and a render must not reorder
+   * anything. Insertion order is close enough to use order here, because what
+   * gets evicted is what was fetched furthest back, which is what was on screen
+   * furthest back.
+   */
+  get (key) {
+    return this.results.get(key) || null
+  }
+
   cancel (key) {
-    const at = this.queue.findIndex((job) => job.entry.key === key)
-    if (at < 0) return
-    const [job] = this.queue.splice(at, 1)
+    const job = this.jobs.get(key)
+    if (!job || job.started) return
+    this.jobs.delete(key)
     job.cancelled = true
     job.resolve(null)
   }
@@ -133,12 +159,28 @@ export class ThumbService {
       // Newest first: in a grid being scrolled, the last thing asked for is the
       // thing on screen.
       const job = this.queue.pop()
+      // A cancelled job is left in the stack rather than spliced out of it, so
+      // this is where it actually goes away.
       if (job.cancelled) continue
+      job.started = true
+      this.jobs.delete(job.entry.key)
       this.active++
       this._run(job)
         .then((result) => { if (!job.cancelled) job.resolve(result) })
-        .catch(() => { if (!job.cancelled) job.resolve(null) })
-        .finally(() => { this.active--; this._pump() })
+        // A clip that cannot be read is still an answer, and it is recorded as
+        // one: a caller that asks again on every scroll frame -- which is what
+        // a virtual list does -- must not re-open a corrupt file every time.
+        .catch(() => { if (!job.cancelled) job.resolve(this._publish(job.entry.key, {}, null)) })
+        .finally(() => {
+          // However this ended -- picture, failure or cancellation -- the File
+          // has done its job, and a File pins a blob in the browser process.
+          // Anything listed from a directory can be re-opened by name; a
+          // `webkitdirectory` listing cannot, and its File is the only route
+          // back to the bytes.
+          if (job.entry.dir) job.entry.file = null
+          this.active--
+          this._pump()
+        })
     }
   }
 
@@ -189,6 +231,17 @@ export class ThumbService {
     }
     const result = { info, thumbUrl }
     this.results.set(key, result)
+    // Map iterates in insertion order, so the front of it is the oldest thing
+    // nothing has asked for lately.
+    while (this.results.size > MAX_RESULTS) {
+      const oldest = this.results.keys().next().value
+      const stale = this.results.get(oldest)
+      this.results.delete(oldest)
+      if (stale && stale.thumbUrl) {
+        URL.revokeObjectURL(stale.thumbUrl)
+        this.urls.delete(stale.thumbUrl)
+      }
+    }
     return result
   }
 
@@ -196,6 +249,7 @@ export class ThumbService {
   dispose () {
     for (const job of this.queue) { job.cancelled = true; job.resolve(null) }
     this.queue.length = 0
+    this.jobs.clear()
     for (const url of this.urls) URL.revokeObjectURL(url)
     this.urls.clear()
     this.results.clear()
