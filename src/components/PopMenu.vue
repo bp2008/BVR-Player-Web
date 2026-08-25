@@ -1,38 +1,38 @@
 <template>
-  <div class="streammenu" @keydown.esc.stop="close">
+  <div class="popmenu" @keydown.esc.stop="close">
     <button
       ref="button"
       type="button"
       class="chip chip--button"
-      :class="{ 'chip--open': open }"
-      :title="`Video stream: ${currentName}. Click to choose.`"
+      :class="{ 'chip--open': open, 'chip--on': active }"
+      :title="title"
       aria-haspopup="true"
       :aria-expanded="open ? 'true' : 'false'"
       @click="toggle"
       @dblclick.stop
     >
-      <span class="chip__text">{{ chipLabel }}</span>
+      <span class="chip__text">{{ chip }}</span>
       <AppIcon class="chip__caret" name="caretUp" :size="13" />
     </button>
 
-    <div v-if="open" class="streammenu__panel" role="menu" aria-label="Video stream">
-      <p class="streammenu__title">Video stream</p>
+    <div v-if="open" class="popmenu__panel" role="menu" :aria-label="label">
+      <p class="popmenu__title">{{ label }}</p>
       <button
         v-for="opt in options"
-        :key="opt.value"
+        :key="String(opt.value)"
         type="button"
-        class="streammenu__item"
-        :class="{ 'streammenu__item--on': opt.value === state.streamMode }"
+        class="popmenu__item"
+        :class="{ 'popmenu__item--on': opt.value === value }"
         role="menuitemradio"
-        :aria-checked="opt.value === state.streamMode ? 'true' : 'false'"
+        :aria-checked="opt.value === value ? 'true' : 'false'"
         :disabled="opt.disabled"
         :title="opt.title || null"
         @click="choose(opt)"
         @dblclick.stop
       >
-        <AppIcon class="streammenu__tick" name="check" :size="15" />
-        <span class="streammenu__name">{{ opt.name }}</span>
-        <span class="streammenu__detail">{{ opt.detail }}</span>
+        <AppIcon class="popmenu__tick" name="check" :size="15" />
+        <span class="popmenu__name">{{ opt.name }}</span>
+        <span class="popmenu__detail">{{ opt.detail }}</span>
       </button>
     </div>
   </div>
@@ -40,30 +40,30 @@
 
 <script>
 import AppIcon from './AppIcon.vue'
-import { streamOptions, streamChipLabel } from '../util/streams.js'
 
+/**
+ * The chip-with-a-popup pattern the control bar uses for its short pick lists.
+ *
+ * Shared rather than repeated so the stream picker and the speed picker cannot
+ * drift apart in how they open, dismiss or announce themselves.
+ */
 export default {
-  name: 'StreamMenu',
+  name: 'PopMenu',
   components: { AppIcon },
   props: {
-    state: { type: Object, required: true }
+    label: { type: String, required: true },
+    chip: { type: String, required: true },
+    title: { type: String, default: '' },
+    options: { type: Array, required: true },
+    value: { type: [String, Number], default: '' },
+    active: { type: Boolean, default: false }
   },
-  emits: ['stream', 'open-change'],
+  emits: ['choose', 'open-change'],
   data () {
     return { open: false }
   },
-  computed: {
-    options () { return streamOptions(this.state) },
-    chipLabel () { return streamChipLabel(this.state) },
-    currentName () {
-      const cur = this.options.find((o) => o.value === this.state.streamMode)
-      return cur ? cur.label : this.state.streamMode
-    }
-  },
   methods: {
-    toggle () {
-      this.open ? this.close() : this.show()
-    },
+    toggle () { this.open ? this.close() : this.show() },
     show () {
       this.open = true
       this.$emit('open-change', true)
@@ -80,7 +80,7 @@ export default {
     },
     choose (opt) {
       if (opt.disabled) return
-      if (opt.value !== this.state.streamMode) this.$emit('stream', opt.value)
+      if (opt.value !== this.value) this.$emit('choose', opt.value)
       this.close()
     }
   },
@@ -91,7 +91,7 @@ export default {
 </script>
 
 <style scoped>
-.streammenu {
+.popmenu {
   position: relative;
   display: flex;
   align-items: center;
@@ -115,6 +115,11 @@ export default {
   color: var(--text);
 }
 
+.chip--on {
+  border-color: rgba(88, 166, 255, 0.5);
+  color: var(--accent);
+}
+
 .chip--button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -124,7 +129,7 @@ export default {
   opacity: 0.75;
 }
 
-.streammenu__panel {
+.popmenu__panel {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
@@ -138,7 +143,7 @@ export default {
   z-index: 30;
 }
 
-.streammenu__title {
+.popmenu__title {
   margin: 2px 8px 6px;
   font-size: 11px;
   letter-spacing: 0.4px;
@@ -146,7 +151,7 @@ export default {
   color: var(--text-dim);
 }
 
-.streammenu__item {
+.popmenu__item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -164,45 +169,37 @@ export default {
   user-select: none;
 }
 
-.streammenu__item:hover:not(:disabled) {
+.popmenu__item:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.11);
 }
 
-.streammenu__item:disabled {
+.popmenu__item:disabled {
   opacity: 0.42;
   cursor: default;
 }
 
-.streammenu__item:focus-visible {
+.popmenu__item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
-.streammenu__tick {
+.popmenu__tick {
   visibility: hidden;
   color: var(--accent);
 }
 
-.streammenu__item--on .streammenu__tick {
+.popmenu__item--on .popmenu__tick {
   visibility: visible;
 }
 
-.streammenu__name {
+.popmenu__name {
   flex: 1 1 auto;
 }
 
-.streammenu__detail {
+.popmenu__detail {
   color: var(--text-dim);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-/* The control row has no room for the chip on a phone, and dropping it there
-   would push the settings and fullscreen buttons off the edge. The same picker
-   lives in the settings panel, which stays reachable. Kept in this file so it
-   outranks the unscoped `.streammenu` above on specificity. */
-@media (max-width: 620px) {
-  .streammenu { display: none; }
 }
 </style>

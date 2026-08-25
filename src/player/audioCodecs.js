@@ -106,6 +106,32 @@ export function packetSampleCount (wfx, byteLength, constantBlockSize) {
   }
 }
 
+/**
+ * Start time in ms for every audio packet, rebuilt from cumulative sample
+ * counts.
+ *
+ * Spec 6 warns that the stored per-packet timestamp is not a start time: FLAC
+ * packets are stamped near their *end*, and very old files stamp every packet 0.
+ * The stream is continuous from the first video frame, though, so counting
+ * samples gives exact starts from the frame table alone. When a packet's sample
+ * count cannot be derived the stored timestamps are the only thing left, and
+ * this falls back to them wholesale rather than mixing the two.
+ */
+export function packetStartTimes (wfx, audio, extradata) {
+  if (!audio || !audio.count || !wfx || !wfx.nSamplesPerSec) return null
+  const blockSize = wfx.wFormatTag === WAVE_FORMAT_FLAC ? flacBlockSize(extradata) : 0
+  const starts = new Float64Array(audio.count)
+  const origin = audio.ts[0]
+  let cum = 0
+  for (let i = 0; i < audio.count; i++) {
+    const n = packetSampleCount(wfx, audio.size[i], blockSize)
+    if (n <= 0) return Float64Array.from(audio.ts)
+    starts[i] = origin + (cum * 1000) / wfx.nSamplesPerSec
+    cum += n
+  }
+  return starts
+}
+
 export function audioCodecLabel (wfx) {
   switch (wfx.wFormatTag) {
     case WAVE_FORMAT_PCM: return `PCM ${wfx.wBitsPerSample}-bit`

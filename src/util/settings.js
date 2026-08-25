@@ -6,7 +6,18 @@ export const DEFAULT_SETTINGS = {
   muted: false,
   loop: false,
   timeDisplay: 'elapsed', // 'elapsed' | 'clock'
-  streamMode: 'auto'
+  streamMode: 'auto',
+  // Speed is deliberately not persisted across files -- see App.openFile. It
+  // lives here only so the settings menu has one place to read and write.
+  playbackRate: 1,
+  // Overlay drawing is off by default: these are boxes and text the recorder
+  // would have drawn, not part of the picture, and a viewer should opt in.
+  overlay: false,
+  overlayShapes: true,
+  overlayText: true,
+  overlayGraphics: true,
+  libraryView: 'grid',   // 'grid' | 'list'
+  librarySort: 'time-desc'
 }
 
 /** localStorage is unavailable in some file:// and private-mode contexts. */
@@ -21,6 +32,8 @@ export function loadSettings () {
     }
     out.skipSeconds = Math.min(600, Math.max(1, Math.round(out.skipSeconds) || 10))
     out.volume = Math.min(1, Math.max(0, out.volume))
+    out.playbackRate = Math.min(16, Math.max(0.05, out.playbackRate || 1))
+    if (out.libraryView !== 'list') out.libraryView = 'grid'
     return out
   } catch {
     return { ...DEFAULT_SETTINGS }

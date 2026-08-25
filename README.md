@@ -7,7 +7,8 @@ browser — the file is never uploaded anywhere.
 
 https://bp2008.github.io/BVR-Player-Web/
 
-Open the player, then drag a `.bvr` file onto the page or press **Open**.
+Open the player, then drag a `.bvr` file onto the page or press **Open**. Press
+**Browse** to page through a whole folder of recordings with thumbnails.
 
 ### Requirements
 
@@ -22,13 +23,59 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Skip back / forward | ↺ / ↻ buttons | <kbd>←</kbd> / <kbd>→</kbd> |
 | Previous / next frame | ⏮ / ⏭ buttons | <kbd>,</kbd> / <kbd>.</kbd> (or <kbd>Shift</kbd>+arrow) |
 | Seek | scrub bar | <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>0</kbd>–<kbd>9</kbd> |
+| Playback speed | speed chip | <kbd>[</kbd> / <kbd>]</kbd> |
+| Zoom / pan | wheel, pinch, drag | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>Z</kbd> to reset |
 | Volume / mute | speaker button + slider | <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>M</kbd> |
 | Fullscreen | ⛶ button, or double-click the video | <kbd>F</kbd> |
 | Open a file | Open button | <kbd>O</kbd> |
+| Browse a folder | Browse button | <kbd>L</kbd> |
+| Metadata inspector | layers button | <kbd>I</kbd> |
+| Export to MP4 | download button | <kbd>E</kbd> |
 
-The skip interval (default 10 s), time display (elapsed or wall clock), loop, and
-— for dual-stream recordings — the main/sub stream selection live in the settings
-menu and persist in the web browser's `localStorage`.
+Double-clicking the video resets the zoom when zoomed in, and toggles fullscreen
+otherwise.
+
+The skip interval (default 10 s), time display (elapsed or wall clock), loop,
+playback speed, overlay drawing, and — for dual-stream recordings — the main/sub
+stream selection live in the settings menu and persist in the web browser's
+`localStorage`.
+
+### Browsing a folder
+
+**Browse** lists every `.bvr` file in a directory with a thumbnail, camera name,
+start time and duration, grouped by day. Nothing is uploaded, and only a few
+hundred kilobytes of each file is read: the header, the first key frame, and a
+short read from the end for the clip length. Thumbnails are cached in IndexedDB
+so a folder is only paid for once.
+
+This needs the page to be served over http(s) — the directory APIs have nothing
+to grant access to on a `file://` page — so the button only appears where it
+works. Opening one file at a time is unaffected.
+
+### Metadata
+
+BVR carries more than pictures: overlay text and clocks, motion and AI bounding
+boxes, GPS, per-frame camera state and DIO inputs, marks, and the camera's motion
+mask. The **metadata** button opens an inspector over three tabs — the file as a
+whole, the current frame, and a timeline of marks and recording-segment starts
+that seeks on click. Overlays can also be drawn back over the video, where they
+stay registered with the picture under rotation, flip and zoom.
+
+### Exporting to MP4
+
+**Export** writes an MP4 of the whole recording or a trimmed range, in one of two
+ways:
+
+- **Copy frames** — the compressed frames are moved into an MP4 container
+  untouched. Fast, lossless, and the file is about the size of the source. It can
+  only begin on a key frame, so the dialog says when the start has to shift.
+- **Re-encode** — decode and encode again, which trims exactly and can change
+  codec, bitrate, resolution and frame rate.
+
+Audio is always re-encoded to AAC: none of the formats BVR carries (FLAC, PCM,
+G.711 µ-law) has an MP4 form players can be relied on to handle. Where the
+browser supports it, the file is written straight to disk as it is produced, so
+an export can be far larger than memory.
 
 
 ## Technical Details for Developers

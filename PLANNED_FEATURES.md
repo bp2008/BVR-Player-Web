@@ -4,163 +4,141 @@ Internal roadmap notes. This file is **not** part of the deployed app — it is 
 referenced from `index.html`, not copied out of `public/`, and never reaches the
 built `docs/` output.
 
-Version 1 deliberately ships only the transport controls. The notes below record
-which of the planned features already have a hook in the current design and what
-each one still needs, so the groundwork stays intentional rather than accidental.
+Version 1 shipped only the transport controls. The four features below have since
+been built; what follows records how each one turned out, the places where the
+implementation had to disagree with the spec, and the one item still outstanding.
 
 ---
 
-## 1. Folder browser with thumbnails
+## 1. Folder browser with thumbnails — **done**
 
 In-app browsing of a directory of `.bvr` files, with a thumbnail per clip.
 
-**Already in place**
+**How it works**
 
-- `BvrPlayer.open()` accepts any `Blob`/`File`, so it does not care whether the
-  file came from a picker, a drop, or a directory listing.
-- `BlobReader` is windowed and never reads a whole file, so producing a thumbnail
-  costs one header parse plus one key frame — a few hundred kilobytes regardless
-  of clip length.
-- `describeVideoCodec()` derives a complete `VideoDecoderConfig` from a single
-  key frame, so a thumbnail needs no playback pipeline at all.
+- `src/library/directory.js` — `showDirectoryPicker()` on Chromium, with
+  `<input type="file" webkitdirectory>` as the fallback. Neither works from
+  `file://`, so the **Browse** button only appears where one of them does; the
+  single-file flow is untouched either way.
+- `src/library/thumbnailer.js` — per clip: file header, a walk of the opening
+  frames to the first key frame, that key frame decoded, downscaled to an
+  `OffscreenCanvas` and encoded as WebP. Cost is fixed at a few hundred kilobytes
+  whether the recording is thirty seconds or two hours. The **sub** stream is
+  preferred when present: smaller, faster, and it scales down to a thumbnail
+  better anyway.
+- Clip length comes from spec §9.3 — read backwards from EOF for the last
+  complete video frame (`src/bvr/tail.js`). Two short reads give a duration for a
+  file that is never otherwise opened.
+- `src/library/thumbWorker.js` + `thumbService.js` — a small worker pool, with
+  the identical module run inline where `new Worker()` is unavailable. Blobs
+  cross to the worker by reference, so handing over a two-gigabyte recording
+  costs nothing. Vite's `?worker&inline` keeps it inside the single-file build.
+- `src/library/thumbCache.js` — IndexedDB, keyed by (name, size, mtime), with LRU
+  trimming. It also persists the directory handle so the last folder reopens,
+  subject to the permission re-grant browsers require after a reload.
+- `src/library/bvrName.js` — Blue Iris encodes camera and start time into the
+  file name (`hillsidedrivet.20260824_203931Z.bvr`), which is free to read and
+  lets the grid group by day and sort before any file is touched.
 
-**Still needed**
+## 2. Digital zoom and pan — **done**
 
-- Directory access. `showDirectoryPicker()` (File System Access API) on Chromium,
-  with `<input type="file" webkitdirectory>` as the fallback; neither works from
-  `file://`, so the browser must degrade to the current single-file flow there.
-- A thumbnail worker: open → parse header → read first key frame → decode one
-  frame → `createImageBitmap` → downscale to a canvas → cache. Keep it off the
-  main thread, but remember that `new Worker()` is unavailable on `file://`.
-- A thumbnail cache keyed by (name, size, mtime), most likely in IndexedDB.
-- A grid/list view, sorting, and a filename-derived timeline (Blue Iris encodes
-  camera and UTC start into the file name, e.g.
-  `hillsidedrivet.20260824_203931Z.bvr`).
+- `Renderer` gained `zoomAt`, `panBy`, `clampView` and a screen-to-frame mapping.
+  Pan is bounded by how far the drawn image extends past the viewport, so at zoom
+  1 it collapses to zero (the picture stays centred) and above that it stops
+  exactly when a frame edge meets a viewport edge.
+- `src/player/ViewController.js` — wheel zoom about the pointer, two-finger
+  pinch about the midpoint, drag to pan once zoomed, and a drag-versus-click
+  latch so panning never toggles playback on release.
+- Zoom survives seeks, stream switches and fullscreen; it resets on a new file.
+- **Double click** resets zoom when zoomed and toggles fullscreen otherwise —
+  the roadmap wanted both on the same gesture, and this is the ordering that
+  reads naturally. <kbd>F</kbd> and the button still reach fullscreen either way.
+- A zoom chip appears in the control bar while zoomed, and clicking it resets.
 
-**Design constraint**
+## 3. Export to MP4 — **done**
 
-Persisted directory handles require IndexedDB and a served origin. The folder
-browser should therefore be an enhancement that appears when supported, never a
-precondition for opening a single file.
+Both modes shipped, sharing one muxer (`src/export/`).
 
----
+- **Remux.** `bitstream.js` converts Annex-B to length-prefixed samples and
+  builds `avcC` / `hvcC` from the parameter sets, including the High-profile
+  chroma/bit-depth extension for H.264 and the full profile-tier-level block for
+  HEVC. Parameter sets are collected across *every* key frame visited, which the
+  moov-last layout makes possible; a stream that redefines one id mid-file is
+  detected and reported rather than silently mangled.
+- **Transcode.** `VideoDecoder` into `VideoEncoder`, with codec, bitrate,
+  resolution and frame-rate options. This is the mode that can trim exactly:
+  decoding starts at the preceding key frame and the lead-in is dropped.
+- **Layout.** `ftyp`, `mdat`, `moov`. Index-last is what keeps the job to one
+  pass — sample sizes are only known once each sample has been converted, and
+  reading the source twice to learn them in advance would double the I/O on a
+  file that may be gigabytes.
+- **Audio.** FLAC, PCM and µ-law all go through `AudioEncoder` to AAC, since none
+  of the three has an MP4 form players can be relied on to handle. The dialog
+  says so. Audio is encoded first and spliced into the video stream at
+  one-second chunk boundaries.
+- **Trim.** Handles on the scrub bar, plus "start/end at playhead". A stream copy
+  that has to shift to the preceding key frame says by how much and offers the
+  re-encode instead.
+- **Delivery.** `showSaveFilePicker()` where available, so a multi-gigabyte
+  export never exists in memory; a Blob download otherwise, with a warning above
+  1.5 GB.
+- **Switching mode** is refused for a stream copy and the dialog explains why —
+  the resolution change mid-stream is what MP4 tolerates poorly, so the user is
+  pointed at the single-stream selection instead.
 
-## 2. Digital zoom and pan
+## 4. BVR metadata viewer — **done**
 
-Pinch-zoom, mouse-wheel zoom, and click-drag panning of the video surface.
-Implementation specifics to be supplied later.
+- `src/bvr/metadata.js` — the 692-byte `overobdata` array (type 1), the
+  `{ int32 index, int32 size, bytes }` update stream (type 2), 56-byte
+  `shapeobdata` boxes, UTF-16LE text, embedded images and the GPS triple.
+- The index now retains `dio_inputs` and `state_bits` per video frame — two extra
+  typed arrays — so an overlay object's `stateflags` / `dio` draw conditions can
+  be evaluated against any frame.
+- `src/player/MetadataPipeline.js` folds records forward as the playhead moves.
+  A seek does not replay the file: spec §7 guarantees shapes and every changed
+  object are rewritten after each key frame, so rebuilding costs record 0 plus
+  the handful inside the current GOP.
+- `src/player/overlayPainter.js` draws boxes, text and images through the
+  `Renderer` transform, so they stay registered with the picture under rotation,
+  flip and zoom. Glyphs are counter-rotated so a rotated recording does not get
+  unreadable text.
+- `MetadataPanel.vue` — a per-frame inspector, a file-level summary (codecs,
+  streams, recording window, AOI, motion-mask geometry with a rendered grid), and
+  a timeline of marks and segment starts that seeks on click.
 
-**Already in place**
+### Where the files disagreed with the spec
 
-- `Renderer` never relies on the canvas intrinsic size. It sizes the backing
-  store to the element box and draws through an explicit transform chain
-  (fit → zoom → pan → rotate → flip). The zoom feature only has to write to
-  `renderer.view = { zoom, panX, panY }` and re-draw.
-- `BvrPlayer._repaint()` re-presents the current frame from the decoded-frame
-  window, so zoom changes while paused redraw at full resolution rather than
-  upscaling a stale bitmap.
-- Frames are retained as `ImageBitmap`s at native resolution, so zooming in
-  reveals real detail instead of magnifying a display-sized copy.
+Spec §7.1 describes the overlay placement rectangle and `shapeobdata.rect` as
+"video pixels". Every file Blue Iris actually writes disagrees: a full-frame
+overlay is `(0, 0, 1000, 1000)`, and bounding boxes on a 1920×1080 recording
+reach exactly 1000 at the frame edge. They are per-axis thousandths — which is
+also the only reading under which the spec's own "if `right <= left`, treat width
+as 100" default makes sense as a placement rule. The parser reads thousandths and
+falls back to pixels for any rectangle that overflows that range.
 
-**Still needed**
-
-- Pointer handling: wheel (zoom about the cursor), two-pointer pinch, drag to
-  pan, double-click to reset.
-- Clamping so the visible region cannot leave the frame, and a minimum zoom of
-  1 (or a configurable "fit" mode).
-- Interaction with fullscreen and with the rotation bits from the file header.
-- A zoom indicator, and a decision about whether zoom state survives a seek or a
-  file change (it should survive a seek).
-
----
-
-## 3. Export to MP4
-
-Two distinct modes:
-
-**a. Remux (cheap).** Copy the existing access units into an MP4 container with
-no re-encoding. BVR stores Annex-B elementary streams with in-band parameter
-sets, so this requires converting Annex-B start codes to length-prefixed AVCC /
-HVCC samples, building `avcC`/`hvcC` from the SPS/PPS (and VPS for HEVC) that
-`codec.js` already knows how to locate, and writing the `moov` from the frame
-table the indexer already builds.
-
-**b. Transcode.** Decode with `VideoDecoder` and re-encode with `VideoEncoder`,
-exposing codec, bitrate, resolution and frame-rate options.
-
-**Already in place**
-
-- The index carries byte offset, size, timestamp, UTC and flags for every frame
-  of both streams, which is exactly the sample table an MP4 writer needs — no
-  second pass over the file.
-- `splitAnnexB()` already separates NAL units, which is the core of the Annex-B →
-  AVCC conversion.
-- Audio packet start times are reconstructed exactly from cumulative sample
-  counts (`AudioPipeline.prepare()`), so an audio track can be written with
-  correct sample durations.
-- The `VideoPipeline` decode-window design (feed from a key frame, drop the
-  lead-in) is the same machinery a range export needs.
-
-**Still needed**
-
-- An MP4 muxer. Writing one is very feasible for this narrow case (no B-frames,
-  one or two tracks); a library is the alternative but must stay bundle-friendly
-  and work without a server.
-- Trim range selection in the UI, plus the rule that a remux can only start at a
-  key frame — a non-key start either shifts to the previous key frame or forces
-  transcoding.
-- Output delivery. `showSaveFilePicker()` where available, otherwise a Blob
-  download; large exports need streaming to avoid materialising the whole file
-  in memory.
-- Audio handling: FLAC and µ-law are not MP4-native, so audio must either be
-  transcoded (AAC/Opus via `AudioEncoder`) or dropped, and the UI has to say so.
-- Switching-mode files change resolution mid-stream, which MP4 tolerates poorly;
-  export should offer a single-stream selection in that case.
-
----
-
-## 4. BVR metadata viewer
-
-Surface the overlay objects, GPS records, AI/motion bounding boxes, camera state
-bits, marks and the motion mask that the format carries.
-
-**Already in place**
-
-- `parseFileHeader()` returns the full header: `WAVEFORMATEX`, both
-  `BITMAPINFOHEADER`s, the AOI rectangles and the decoded motion mask
-  (dimensions, packed bits and the "show motion" flag byte).
-- `buildIndex()` collects every metadata frame as
-  `{ offset, size, subtype, ts, utc }` and every `MARK` frame as
-  `{ stream, idx, ts, utc }`, so the viewer needs no extra file scan.
-- Per-frame `utc`, `dio_inputs` and `state_bits` are parsed by
-  `readFrameHeader()`; the index currently keeps `utc` and drops the other two.
-
-**Still needed**
-
-- Record parsers for spec §7: the 692-byte `overobdata` array (type 1) and the
-  `{ int32 index, int32 size, bytes }` update stream (type 2), including the
-  56-byte `shapeobdata` boxes, UTF-16LE text, embedded images and the GPS
-  triple.
-- Widen the index to retain `dio_inputs` and `state_bits` per video frame — two
-  extra typed arrays — so overlay draw conditions (`stateflags`, `dio`) can be
-  evaluated.
-- A panel UI: a per-frame inspector, a timeline of marks and discontinuities, and
-  a file-level summary (codecs, streams, recording window, mask geometry).
-- Optional overlay rendering on the video surface (bounding boxes and text drawn
-  from type-2 records), which shares the `Renderer` transform so it stays correct
-  under rotation and, later, zoom.
+Marks and segment starts are collected from the **whole file** rather than from
+the stream being played: a dual-stream recording routinely puts its mark on one
+stream only, and `utilityvisible` in `sample/` does exactly that.
 
 ---
 
-## Cross-cutting items not yet addressed
+## Cross-cutting items
 
-- **Playback speed.** The clock (`MediaClock.rate`) already has the field and the
-  presentation loop is rate-agnostic; audio would need resampling or muting
-  above/below 1×, which is what the reference Blue Iris player does.
-- **Workers.** Indexing and thumbnailing want a worker, but `new Worker()` is
-  blocked on `file://`. Any worker use must be feature-detected with an inline
-  fallback so the double-click-the-HTML deployment keeps working.
-- **Very large files.** The current design scans the whole file once on open. A
-  multi-gigabyte clip on a network share would want the spec's
-  interpolate-and-search seeking (§9.5) instead; the index structure could be
-  made sparse without changing the player above it.
+- **Playback speed — done.** 0.25× to 8×, from the control bar chip, the settings
+  menu or <kbd>[</kbd> / <kbd>]</kbd>. Audio is muted away from 1×, which is what
+  the reference Blue Iris player does; resampling it would only produce
+  pitch-shifted surveillance audio nobody wants.
+- **Workers — done.** Thumbnailing runs in a small worker pool, feature-detected
+  with an inline fallback so the double-click-the-HTML deployment keeps working.
+  Indexing stays on the main thread: it already yields to the event loop often
+  enough to keep the progress bar painting, and it is bounded by read throughput
+  rather than by computation, so a worker would buy little.
+- **Very large files — not done, deliberately.** The design still scans the whole
+  file once on open. Making the index sparse and seeking by the spec's
+  interpolate-and-search (§9.5) would help a multi-gigabyte clip on a network
+  share, but it trades away the property the current design is built on: every
+  seek is exact and needs no searching. `src/bvr/tail.js` now implements the
+  backwards last-frame scan (§9.3) that such a mode would need, so the groundwork
+  is there — but the switch itself is a change to how seeking works, not an
+  addition, and should be a deliberate decision rather than a side effect of
+  building the features above.

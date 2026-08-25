@@ -1,4 +1,6 @@
-import { FLAG_ISKEY, FLAG_MAINAVAILABLE, STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
+import {
+  FLAG_ISKEY, FLAG_MAINAVAILABLE, FLAG_ISDISCONTINUITY, STREAM_MAIN, STREAM_SUB
+} from '../bvr/constants.js'
 
 /** Which streams hold frames and can actually be decoded on this device. */
 function usableStreams (index, playable) {
@@ -72,6 +74,8 @@ export function buildPlaybackStream (index, header, mode, playable = [true, true
     out.ts[k] = src.ts[i]
     out.utc[k] = src.utc[i]
     out.flags[k] = src.flags[i]
+    out.dio[k] = src.dio[i]
+    out.state[k] = src.state[i]
     out.srcStream[k] = s
   }
   computeKeys(out)
@@ -93,6 +97,8 @@ function emptyStream (count) {
     ts: new Float64Array(count),
     utc: new Float64Array(count),
     flags: new Uint16Array(count),
+    dio: new Uint32Array(count),
+    state: new Uint32Array(count),
     srcStream: new Uint8Array(count),
     keyIdx: new Int32Array(count),
     keys: null,
@@ -120,6 +126,8 @@ function decorate (src, si, header, index) {
     ts: src.ts,
     utc: src.utc,
     flags: src.flags,
+    dio: src.dio,
+    state: src.state,
     srcStream: null,
     keyIdx: src.keyIdx,
     keys: src.keys,
@@ -133,6 +141,49 @@ function decorate (src, si, header, index) {
     _srcIndex: si,
     _index: index
   }
+}
+
+/**
+ * Marks and segment starts across the whole recording.
+ *
+ * Both are read from the file's own streams rather than from the sequence being
+ * played: a dual-stream recording routinely puts its mark on one stream only,
+ * and a viewer watching the other one should still see that something was
+ * bookmarked there. The two streams share a timebase, so the times map onto the
+ * scrub bar either way.
+ *
+ * The first frame of a recording is always a discontinuity (spec 5), which is
+ * not worth a tick of its own at time zero. Near-simultaneous discontinuities on
+ * the two streams are the same event and are reported once.
+ */
+const SAME_EVENT_MS = 40
+
+export function collectMarkers (index) {
+  const marks = []
+  const segments = []
+  if (!index) return { marks, segments }
+
+  for (const m of index.marks) {
+    marks.push({ index: m.idx, ts: m.ts - index.baseTs, utc: m.utc, stream: m.stream })
+  }
+  marks.sort((a, b) => a.ts - b.ts)
+
+  for (let si = 0; si < index.streams.length; si++) {
+    const s = index.streams[si]
+    for (let i = 1; i < s.count; i++) {
+      if (s.flags[i] & FLAG_ISDISCONTINUITY) {
+        segments.push({ index: i, ts: s.ts[i], utc: s.utc[i], stream: si })
+      }
+    }
+  }
+  segments.sort((a, b) => a.ts - b.ts)
+  const merged = []
+  for (const seg of segments) {
+    const last = merged[merged.length - 1]
+    if (last && seg.ts - last.ts <= SAME_EVENT_MS) continue
+    merged.push(seg)
+  }
+  return { marks, segments: merged }
 }
 
 /** Median inter-frame interval in ms; used for frame stepping and EOF slack. */

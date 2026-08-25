@@ -2,14 +2,96 @@ import { BlobReader } from '../bvr/blobReader.js'
 import { parseFileHeader } from '../bvr/parseFileHeader.js'
 import { buildIndex, frameIndexForTime } from '../bvr/indexer.js'
 import { probeVideoStreams, probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
-import { buildPlaybackStream, resolveStreamMode, estimateFrameInterval } from './playbackStream.js'
+import {
+  buildPlaybackStream, resolveStreamMode, estimateFrameInterval, collectMarkers
+} from './playbackStream.js'
 import { VideoPipeline } from './VideoPipeline.js'
 import { AudioPipeline } from './AudioPipeline.js'
+import { MetadataPipeline } from './MetadataPipeline.js'
 import { MediaClock, performanceWall } from './MediaClock.js'
 import { Renderer } from './Renderer.js'
+import { paintOverlay } from './overlayPainter.js'
+import { snapshotOverlay } from '../bvr/metadata.js'
 import { audioCodecLabel } from './audioCodecs.js'
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
+
+/** Rates offered by the UI. Audio is muted away from 1x (see setRate). */
+export const PLAYBACK_RATES = [0.25, 0.5, 1, 1.5, 2, 4, 8]
+
+/**
+ * The complete shape of the state the player publishes.
+ *
+ * Exported so the Vue layer can seed itself from the same definition rather
+ * than keeping a second copy that quietly drifts as fields are added.
+ */
+export function createBlankState () {
+  return {
+    status: 'idle',
+    loadProgress: 0,
+    fileName: '',
+    fileSize: 0,
+    playing: false,
+    buffering: false,
+    ended: false,
+    currentTime: 0,
+    duration: 0,
+    frameIndex: 0,
+    frameCount: 0,
+    volume: 1,
+    muted: false,
+    hasAudio: false,
+    audioLabel: '',
+    videoLabel: '',
+    width: 0,
+    height: 0,
+    fps: 0,
+    streamMode: 'auto',
+    streamLabel: '',
+    hasSubStream: false,
+    hasMainStream: false,
+    switchingMode: false,
+    mainWidth: 0,
+    mainHeight: 0,
+    subWidth: 0,
+    subHeight: 0,
+    startUtc: 0,
+    currentUtc: 0,
+    truncated: false,
+    mainCodecLabel: '',
+    subCodecLabel: '',
+    mainFourcc: '',
+    subFourcc: '',
+    mainCodecSupported: true,
+    subCodecSupported: true,
+    codecWarning: '',
+    error: '',
+
+    // Digital zoom, driven from outside by the ViewController.
+    zoom: 1,
+    zoomed: false,
+
+    // Playback speed. Audio only runs at 1x (see setRate).
+    rate: 1,
+
+    // Overlay metadata (spec section 7).
+    hasMetadata: false,
+    overlayEnabled: false,
+    overlayObjects: 0,
+    overlayShapes: 0,
+    overlayReady: false,
+    overlayList: [],
+    gps: null,
+    stateBits: 0,
+    dioInputs: 0,
+
+    // Marks and segment starts, for the scrub bar and the inspector.
+    marks: [],
+    segments: [],
+    resyncs: 0,
+    fileSizeBytes: 0
+  }
+}
 
 /**
  * Orchestrates parsing, decoding, presentation and transport controls.
@@ -31,8 +113,10 @@ export class BvrPlayer {
     this.pstream = null
     this.video = null
     this.audio = null
+    this.metadata = null
     this.codecInfo = null
     this.probe = null
+    this.blob = null
 
     this.streamMode = 'auto'
     this.frameIntervalMs = 33.367
@@ -44,55 +128,16 @@ export class BvrPlayer {
     this.volume = 1
     this.muted = false
 
+    // Which classes of overlay object are drawn over the video. The file's own
+    // objects are always parsed; this only decides what reaches the canvas.
+    this.overlay = { enabled: false, shapes: true, text: true, graphics: true }
+    this.renderer.setOverlayPainter((ctx, geom) => this._paintOverlay(ctx, geom))
+
     this._raf = 0
     this._generation = 0
     this._destroyed = false
-    this._state = this._blankState()
+    this._state = createBlankState()
     this._loop = this._loop.bind(this)
-  }
-
-  _blankState () {
-    return {
-      status: 'idle',
-      loadProgress: 0,
-      fileName: '',
-      fileSize: 0,
-      playing: false,
-      buffering: false,
-      ended: false,
-      currentTime: 0,
-      duration: 0,
-      frameIndex: 0,
-      frameCount: 0,
-      volume: 1,
-      muted: false,
-      hasAudio: false,
-      audioLabel: '',
-      videoLabel: '',
-      width: 0,
-      height: 0,
-      fps: 0,
-      streamMode: 'auto',
-      streamLabel: '',
-      hasSubStream: false,
-      hasMainStream: false,
-      switchingMode: false,
-      mainWidth: 0,
-      mainHeight: 0,
-      subWidth: 0,
-      subHeight: 0,
-      startUtc: 0,
-      currentUtc: 0,
-      truncated: false,
-      mainCodecLabel: '',
-      subCodecLabel: '',
-      mainFourcc: '',
-      subFourcc: '',
-      mainCodecSupported: true,
-      subCodecSupported: true,
-      codecWarning: '',
-      error: ''
-    }
   }
 
   _emit (patch) {
@@ -107,9 +152,10 @@ export class BvrPlayer {
   async open (file) {
     this.closeFile()
     const gen = ++this._generation
-    this._emit({ ...this._blankState(), status: 'loading', fileName: file.name, fileSize: file.size })
+    this._emit({ ...createBlankState(), status: 'loading', fileName: file.name, fileSize: file.size })
 
     try {
+      this.blob = file
       this.reader = new BlobReader(file)
       this.header = await parseFileHeader(this.reader)
       if (gen !== this._generation) return
@@ -142,16 +188,22 @@ export class BvrPlayer {
       if (!this.probe.anySupported) throw new Error(this.probe.summary)
 
       this.renderer.setOrientation(this.header.rotation, this.header.flipH)
+      this.renderer.resetView()
 
       await this._selectStream(this.streamMode, true)
       if (gen !== this._generation) return
 
       this._setupAudio()
+      this._setupMetadata()
       this._emit({
         status: 'ready',
         loadProgress: 1,
         startUtc: this.index.startUtc,
         truncated: this.index.truncated,
+        resyncs: this.index.resyncs,
+        fileSizeBytes: file.size,
+        zoom: 1,
+        zoomed: false,
         hasMainStream: this.index.streams[0].count > 0,
         hasSubStream: this.index.streams[1].count > 0,
         switchingMode: this.index.switchingMode,
@@ -203,6 +255,7 @@ export class BvrPlayer {
     this.renderer.forget()
 
     const duration = pstream.ts[pstream.count - 1] + this.frameIntervalMs
+    const { marks, segments } = collectMarkers(this.index)
     this._emit({
       duration,
       frameCount: pstream.count,
@@ -211,7 +264,9 @@ export class BvrPlayer {
       videoLabel: codecInfo.label,
       fps: this.header.fps,
       streamMode: effective,
-      streamLabel: pstream.streamLabel
+      streamLabel: pstream.streamLabel,
+      marks,
+      segments
     })
 
     // On open the codec warning already explains this; only an explicit switch
@@ -312,6 +367,79 @@ export class BvrPlayer {
     this._emit({ hasAudio: true, audioLabel: audioCodecLabel(this.header.wfx) })
   }
 
+  _setupMetadata () {
+    if (this.metadata) { this.metadata.close(); this.metadata = null }
+    const pipeline = new MetadataPipeline({
+      blob: this.blob,
+      index: this.index,
+      onChange: (state) => this._onOverlayChange(state)
+    })
+    if (!pipeline.hasRecords) {
+      this._emit({ hasMetadata: false, overlayObjects: 0, overlayShapes: 0, overlayReady: false })
+      return
+    }
+    this.metadata = pipeline
+    this._emit({ hasMetadata: true })
+    // The definitions decide what the update records mean, so nothing can be
+    // read until they are in hand.
+    pipeline.load().then(() => {
+      if (!this.metadata) return
+      this._emit({ overlayReady: true })
+      this._updateMetadata(true)
+    }).catch(() => { /* the file plays with or without overlays */ })
+  }
+
+  _onOverlayChange (state) {
+    const objects = snapshotOverlay(state)
+    let shapes = 0
+    for (const obj of objects) shapes += obj.shapes.length
+    this._emit({
+      overlayObjects: objects.length,
+      overlayShapes: shapes,
+      overlayList: objects,
+      gps: state.gps
+    })
+    if (this.overlay.enabled) this._repaint()
+  }
+
+  /** Nudges the overlay state to wherever the playhead now is. */
+  _updateMetadata (force) {
+    if (!this.metadata) return
+    const s = this.pstream
+    if (!s) return
+    const idx = this.curIdx >= 0 ? this.curIdx : 0
+    const ms = s.ts[idx]
+    if (!force && ms === this._metaAt) return
+    this._metaAt = ms
+    const key = s.keyIdx[idx]
+    this.metadata.update(ms, key >= 0 ? s.ts[key] : ms)
+  }
+
+  _paintOverlay (ctx, geom) {
+    if (!this.overlay.enabled || !this.metadata) return
+    const s = this.pstream
+    const idx = this.curIdx >= 0 ? this.curIdx : 0
+    paintOverlay(ctx, geom, {
+      state: this.metadata.state,
+      stateBits: s ? s.state[idx] : 0,
+      dio: s ? s.dio[idx] : 0,
+      show: this.overlay
+    })
+  }
+
+  setOverlay (patch) {
+    this.overlay = { ...this.overlay, ...patch }
+    this._emit({ overlayEnabled: this.overlay.enabled })
+    if (this.overlay.enabled) this._updateMetadata(true)
+    this._repaint()
+  }
+
+  /** The records that apply at the playhead, for the inspector panel. */
+  async metadataAt (ms) {
+    if (!this.metadata) return null
+    return this.metadata.recordAt(ms)
+  }
+
   _onPipelineError (e) {
     const message = e && e.message ? e.message : String(e)
     this._emit({ status: 'error', error: `Video decoding failed: ${message}` })
@@ -323,17 +451,22 @@ export class BvrPlayer {
     this._stop()
     if (this.video) { this.video.close(); this.video = null }
     if (this.audio) { this.audio.close(); this.audio = null }
+    if (this.metadata) { this.metadata.close(); this.metadata = null }
     if (this.reader) { this.reader.release(); this.reader = null }
     this.header = null
     this.index = null
     this.probe = null
     this.pstream = null
+    this.blob = null
     this.curIdx = -1
     this.pendingSeek = null
+    this._metaAt = null
     this.clock.setWallSource(performanceWall)
     this.clock.pause()
+    this.clock.rate = 1
     this.clock.currentTime = 0
     this.renderer.forget()
+    this.renderer.resetView()
     this.renderer.clear()
   }
 
@@ -451,8 +584,61 @@ export class BvrPlayer {
     }
   }
 
+  /**
+   * Sets the playback speed.
+   *
+   * Audio only runs at 1x. Resampling it to follow the video is what the
+   * reference Blue Iris player declines to do as well, and pitch-shifted
+   * surveillance audio would be worse than none: the useful thing at 4x is to
+   * see the picture move, and at 0.25x to see it clearly. The clock itself is
+   * rate-aware, so video timing needs nothing beyond this.
+   */
+  setRate (rate) {
+    const next = clamp(Number(rate) || 1, 0.05, 16)
+    if (next === this.clock.rate) return
+    // Re-anchor before the rate changes, or elapsed time would be re-scaled
+    // retroactively and the picture would jump.
+    const at = this.clock.currentTime
+    this.clock.rate = next
+    this.clock.currentTime = at
+    if (this.audio) {
+      this.audio.stop()
+      if (next === 1 && this.clock.playing) this.audio.seek(at)
+    }
+    this._emit({ rate: next })
+  }
+
   onResize () {
     if (this.renderer.resize()) this._repaint()
+  }
+
+  /** Re-presents the current frame; used after a zoom, pan or overlay change. */
+  repaint () {
+    this._repaint()
+  }
+
+  /** Publishes the view state the UI shows, after the ViewController moved it. */
+  notifyView () {
+    this._emit({ zoom: this.renderer.view.zoom, zoomed: this.renderer.zoomed })
+  }
+
+  /**
+   * Everything an export needs, gathered in one place so the dialog never has to
+   * reach into the player's internals.
+   */
+  exportContext () {
+    if (!this.pstream || !this.index) return null
+    return {
+      blob: this.blob,
+      header: this.header,
+      index: this.index,
+      pstream: this.pstream,
+      fileName: this._state.fileName,
+      // The probe already settled this against a real key frame, and it is what
+      // a transcode has to configure its decoder with.
+      decoderConfig: this.codecInfo && this.codecInfo.kind === 'video' ? this.codecInfo.config : null,
+      audioStarts: this.audio ? this.audio.packetStartMs : null
+    }
   }
 
   // ----------------------------------------------------------------- internal
@@ -491,6 +677,9 @@ export class BvrPlayer {
   _present (idx, frame) {
     this.curIdx = idx
     this.video.setAnchor(idx)
+    // Overlays are folded forward before the frame is painted, so a record that
+    // is already resident lands on the same frame it describes.
+    this._updateMetadata(false)
     this.renderer.draw(frame)
   }
 
@@ -564,7 +753,13 @@ export class BvrPlayer {
     if (Math.abs(now - this._state.currentTime) > 4 ||
         idx !== this._state.frameIndex ||
         utc !== this._state.currentUtc) {
-      this._emit({ currentTime: now, frameIndex: idx, currentUtc: utc })
+      this._emit({
+        currentTime: now,
+        frameIndex: idx,
+        currentUtc: utc,
+        stateBits: this.curIdx >= 0 ? s.state[this.curIdx] : 0,
+        dioInputs: this.curIdx >= 0 ? s.dio[this.curIdx] : 0
+      })
     }
   }
 }

@@ -2,9 +2,18 @@
  * Canvas presenter for decoded frames.
  *
  * Drawing goes through an explicit transform (fit -> zoom -> pan -> rotate ->
- * flip) rather than relying on the canvas intrinsic size, so the digital-zoom
- * feature planned for a later iteration only has to move `view`.
+ * flip) rather than relying on the canvas intrinsic size. Digital zoom is
+ * therefore a matter of writing `view` and re-drawing, and anything painted on
+ * top of the video -- overlay boxes, overlay text -- can be given in frame
+ * coordinates and inherit the same transform, so it stays registered with the
+ * picture under rotation, flip and zoom alike.
  */
+
+export const MIN_ZOOM = 1
+export const MAX_ZOOM = 16
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
+
 export class Renderer {
   constructor (canvas) {
     this.canvas = canvas
@@ -13,13 +22,20 @@ export class Renderer {
     this.flipH = false
     this.view = { zoom: 1, panX: 0, panY: 0 }
     this.lastFrame = null
+    // Painted inside the frame transform, after the picture itself.
+    this.overlayPainter = null
     this._cssW = 0
     this._cssH = 0
+    this._geom = null
   }
 
   setOrientation (rotation, flipH) {
     this.rotation = ((rotation % 360) + 360) % 360
     this.flipH = !!flipH
+  }
+
+  setOverlayPainter (fn) {
+    this.overlayPainter = fn || null
   }
 
   /** Matches the backing store to the element box; returns true when it changed. */
@@ -28,11 +44,13 @@ export class Renderer {
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
     const w = Math.max(1, Math.round(rect.width * dpr))
     const h = Math.max(1, Math.round(rect.height * dpr))
+    this._cssW = rect.width
+    this._cssH = rect.height
     if (w === this.canvas.width && h === this.canvas.height) return false
     this.canvas.width = w
     this.canvas.height = h
-    this._cssW = rect.width
-    this._cssH = rect.height
+    // A narrower viewport can leave a pan that now shows past the frame edge.
+    this.clampView()
     return true
   }
 
@@ -43,38 +61,139 @@ export class Renderer {
     ctx.fillRect(0, 0, canvas.width, canvas.height)
   }
 
-  /** Draws a VideoFrame or ImageBitmap, letterboxed and oriented. */
-  draw (frame) {
-    if (!frame) return
-    this.lastFrame = frame
-    const { ctx, canvas } = this
-    const sw = frame.displayWidth || frame.width || 0
-    const sh = frame.displayHeight || frame.height || 0
-    if (!sw || !sh) return
+  /** Backing-store pixels per CSS pixel; pointer events arrive in CSS pixels. */
+  get dpr () {
+    if (this._cssW > 0) return this.canvas.width / this._cssW
+    return Math.min(window.devicePixelRatio || 1, 2)
+  }
 
-    const cw = canvas.width
-    const ch = canvas.height
+  /**
+   * The placement of the current picture: where it sits, how big it is drawn,
+   * and the scale factor in force. Null until something has been drawn.
+   */
+  get geometry () { return this._geom }
+
+  _measure (sw, sh) {
+    const cw = this.canvas.width
+    const ch = this.canvas.height
     const swap = this.rotation === 90 || this.rotation === 270
     const dispW = swap ? sh : sw
     const dispH = swap ? sw : sh
     const fit = Math.min(cw / dispW, ch / dispH)
-    const scale = fit * this.view.zoom
+    return { cw, ch, sw, sh, dispW, dispH, fit, scale: fit * this.view.zoom }
+  }
+
+  /**
+   * Holds the pan inside the picture.
+   *
+   * The bound is how far the drawn image extends past the viewport, so at zoom 1
+   * -- where the image is letterboxed rather than cropped -- it collapses to
+   * zero and the picture is pinned centred. Above that, panning stops exactly
+   * when an edge of the frame reaches the corresponding edge of the viewport,
+   * which is the "visible region cannot leave the frame" rule.
+   */
+  clampView () {
+    const v = this.view
+    v.zoom = clamp(v.zoom || 1, MIN_ZOOM, MAX_ZOOM)
+    const g = this._geom
+    if (!g) { v.panX = 0; v.panY = 0; return }
+    const drawnW = g.dispW * g.fit * v.zoom
+    const drawnH = g.dispH * g.fit * v.zoom
+    const maxX = Math.max(0, (drawnW - g.cw) / 2)
+    const maxY = Math.max(0, (drawnH - g.ch) / 2)
+    v.panX = clamp(v.panX, -maxX, maxX)
+    v.panY = clamp(v.panY, -maxY, maxY)
+  }
+
+  /**
+   * Zooms to `zoom` while holding the content under a CSS-pixel point still.
+   *
+   * The anchor is converted into the rotated display space first, so the same
+   * arithmetic serves an upright picture and a rotated one.
+   */
+  zoomAt (zoom, cssX, cssY) {
+    const g = this._geom
+    const next = clamp(zoom, MIN_ZOOM, MAX_ZOOM)
+    if (!g) { this.view.zoom = next; this.clampView(); return }
+    const dpr = this.dpr
+    const px = cssX * dpr
+    const py = cssY * dpr
+    const before = g.fit * this.view.zoom
+    const after = g.fit * next
+    const dx = (px - (g.cw / 2 + this.view.panX)) / before
+    const dy = (py - (g.ch / 2 + this.view.panY)) / before
+    this.view.zoom = next
+    this.view.panX = px - g.cw / 2 - dx * after
+    this.view.panY = py - g.ch / 2 - dy * after
+    this.clampView()
+  }
+
+  /** Moves the picture by a CSS-pixel delta. */
+  panBy (cssDx, cssDy) {
+    const dpr = this.dpr
+    this.view.panX += cssDx * dpr
+    this.view.panY += cssDy * dpr
+    this.clampView()
+  }
+
+  resetView () {
+    this.view.zoom = 1
+    this.view.panX = 0
+    this.view.panY = 0
+    this.clampView()
+  }
+
+  get zoomed () { return this.view.zoom > MIN_ZOOM + 1e-6 }
+
+  /** Draws a VideoFrame or ImageBitmap, letterboxed and oriented. */
+  draw (frame) {
+    if (!frame) return
+    this.lastFrame = frame
+    const { ctx } = this
+    const sw = frame.displayWidth || frame.width || 0
+    const sh = frame.displayHeight || frame.height || 0
+    if (!sw || !sh) return
+
+    const g = this._measure(sw, sh)
+    this._geom = g
+    this.clampView()
+    const scale = g.fit * this.view.zoom
 
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.fillStyle = '#000'
-    ctx.fillRect(0, 0, cw, ch)
+    ctx.fillRect(0, 0, g.cw, g.ch)
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
 
-    ctx.translate(cw / 2 + this.view.panX, ch / 2 + this.view.panY)
+    ctx.save()
+    ctx.translate(g.cw / 2 + this.view.panX, g.ch / 2 + this.view.panY)
     ctx.scale(scale, scale)
     if (this.rotation) ctx.rotate((this.rotation * Math.PI) / 180)
     if (this.flipH) ctx.scale(-1, 1)
     ctx.drawImage(frame, -sw / 2, -sh / 2, sw, sh)
+
+    if (this.overlayPainter) {
+      // Hand the painter a frame-space origin: (0, 0) is the top-left of the
+      // picture and one unit is one frame pixel, whatever the view is doing.
+      ctx.translate(-sw / 2, -sh / 2)
+      try {
+        this.overlayPainter(ctx, {
+          width: sw,
+          height: sh,
+          scale,
+          rotation: this.rotation,
+          flipH: this.flipH
+        })
+      } catch {
+        // A painter that throws must not take the video down with it.
+        this.overlayPainter = null
+      }
+    }
+    ctx.restore()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
   }
 
-  /** Re-draws the last presented frame, e.g. after a resize. */
+  /** Re-draws the last presented frame, e.g. after a resize or a zoom change. */
   redraw () {
     if (!this.lastFrame) return
     try {
@@ -87,5 +206,6 @@ export class Renderer {
 
   forget () {
     this.lastFrame = null
+    this._geom = null
   }
 }

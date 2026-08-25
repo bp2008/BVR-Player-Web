@@ -1,8 +1,5 @@
-import { WAVE_FORMAT_FLAC } from '../bvr/constants.js'
 import { performanceWall } from './MediaClock.js'
-import {
-  buildFlacDescription, flacBlockSize, makeSimpleDecoder, packetSampleCount
-} from './audioCodecs.js'
+import { buildFlacDescription, makeSimpleDecoder, packetStartTimes } from './audioCodecs.js'
 
 const LOOKAHEAD_MS = 700
 const MAX_SCHEDULED = 24
@@ -52,29 +49,17 @@ export class AudioPipeline {
     const a = this.index.audio
     if (!this.header.hasAudio || a.count === 0 || !this.sampleRate) return false
 
-    const blockSize = this.wfx.wFormatTag === WAVE_FORMAT_FLAC
-      ? flacBlockSize(this.header.audioExtradata)
-      : 0
-
-    const starts = new Float64Array(a.count)
-    let cum = 0
-    let usable = true
-    for (let i = 0; i < a.count; i++) {
-      const n = packetSampleCount(this.wfx, a.size[i], blockSize)
-      if (n <= 0) { usable = false; break }
-      starts[i] = cum
-      cum += n
-    }
-
-    // Legacy/odd files: fall back to the stored per-packet timestamps.
+    // Legacy/odd files stamp every packet 0; the stream still starts where the
+    // video does, so the origin is 0 rather than that meaningless stamp.
     const rawFirst = a.ts[0] + this.index.baseTs
     this.startMs = rawFirst === 0 && this.index.baseTs > 0 ? 0 : a.ts[0]
 
-    if (usable) {
-      this.packetStartMs = starts.map((n) => this.startMs + (n * 1000) / this.sampleRate)
-    } else {
-      this.packetStartMs = Float64Array.from(a.ts)
-    }
+    const starts = packetStartTimes(this.wfx, a, this.header.audioExtradata)
+    if (!starts) return false
+    // packetStartTimes anchors on the stored first timestamp; re-anchor onto the
+    // origin worked out above.
+    const shift = this.startMs - a.ts[0]
+    this.packetStartMs = shift === 0 ? starts : starts.map((t) => t + shift)
 
     this.simpleDecode = makeSimpleDecoder(this.wfx)
     this.available = true

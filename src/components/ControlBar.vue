@@ -3,8 +3,12 @@
     <SeekBar
       :current-time="state.currentTime"
       :duration="state.duration"
+      :marks="state.marks"
+      :segments="state.segments"
+      :trim="trim"
       @seek="(ms, preview) => $emit('seek', ms, preview)"
       @scrubbing="(on) => $emit('scrubbing', on)"
+      @trim="(range) => $emit('trim', range)"
     />
 
     <div class="controls__row">
@@ -63,7 +67,7 @@
       <VolumeControl
         :volume="state.volume"
         :muted="state.muted"
-        :enabled="state.hasAudio"
+        :enabled="state.hasAudio && state.rate === 1"
         @update:volume="(v) => $emit('volume', v)"
         @toggle-mute="$emit('toggle-mute')"
       />
@@ -79,18 +83,70 @@
 
       <span v-if="state.buffering" class="chip chip--busy">buffering</span>
 
-      <StreamMenu
+      <button
+        v-if="state.zoomed"
+        type="button"
+        class="chip chip--button chip--zoom"
+        title="Reset zoom (double-click the video, or Z)"
+        @click="$emit('reset-zoom')"
+      >
+        <AppIcon name="zoomIn" :size="13" />
+        <span class="chip__text">{{ state.zoom.toFixed(1) }}&times;</span>
+      </button>
+
+      <PopMenu
+        class="ratemenu"
+        label="Playback speed"
+        :chip="rateLabel"
+        :active="state.rate !== 1"
+        :options="rateOptions"
+        :value="state.rate"
+        @choose="(v) => $emit('rate', v)"
+        @open-change="(o) => setMenuOpen('rate', o)"
+      />
+
+      <PopMenu
         v-if="showStreamChip"
-        :state="state"
-        @stream="(m) => $emit('stream', m)"
+        class="streammenu"
+        label="Video stream"
+        :chip="streamChip"
+        :title="`Video stream: ${currentStreamName}. Click to choose.`"
+        :options="streamOptions"
+        :value="state.streamMode"
+        @choose="(m) => $emit('stream', m)"
         @open-change="(o) => setMenuOpen('stream', o)"
       />
+
+      <button
+        v-if="state.hasMetadata"
+        type="button"
+        class="ctl-btn"
+        :class="{ 'ctl-btn--active': metadataOpen }"
+        title="Metadata (I)"
+        aria-label="Metadata"
+        :aria-pressed="metadataOpen ? 'true' : 'false'"
+        @click="$emit('toggle-metadata')"
+      >
+        <AppIcon name="layers" :size="20" />
+      </button>
+
+      <button
+        type="button"
+        class="ctl-btn"
+        title="Export to MP4 (E)"
+        aria-label="Export to MP4"
+        @click="$emit('export')"
+      >
+        <AppIcon name="download" :size="20" />
+      </button>
 
       <SettingsMenu
         :settings="settings"
         :state="state"
         @patch="(p) => $emit('patch', p)"
         @stream="(m) => $emit('stream', m)"
+        @overlay="(p) => $emit('overlay', p)"
+        @rate="(v) => $emit('rate', v)"
         @open-change="(o) => setMenuOpen('settings', o)"
       />
 
@@ -112,23 +168,28 @@ import AppIcon from './AppIcon.vue'
 import SeekBar from './SeekBar.vue'
 import VolumeControl from './VolumeControl.vue'
 import SettingsMenu from './SettingsMenu.vue'
-import StreamMenu from './StreamMenu.vue'
+import PopMenu from './PopMenu.vue'
 import { formatTime, formatUtc } from '../util/format.js'
+import { streamChipLabel, streamOptions } from '../util/streams.js'
+import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
 
 export default {
   name: 'ControlBar',
-  components: { AppIcon, SeekBar, VolumeControl, SettingsMenu, StreamMenu },
+  components: { AppIcon, SeekBar, VolumeControl, SettingsMenu, PopMenu },
   props: {
     state: { type: Object, required: true },
     settings: { type: Object, required: true },
-    fullscreen: { type: Boolean, default: false }
+    fullscreen: { type: Boolean, default: false },
+    metadataOpen: { type: Boolean, default: false },
+    trim: { type: Object, default: null }
   },
   emits: [
-    'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume',
-    'toggle-mute', 'toggle-fullscreen', 'patch', 'stream', 'menu-open'
+    'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume', 'toggle-mute',
+    'toggle-fullscreen', 'patch', 'stream', 'menu-open', 'rate', 'reset-zoom',
+    'toggle-metadata', 'export', 'overlay', 'trim'
   ],
   data () {
-    return { openMenus: { settings: false, stream: false } }
+    return { openMenus: { settings: false, stream: false, rate: false } }
   },
   computed: {
     skipSeconds () { return this.settings.skipSeconds },
@@ -136,6 +197,14 @@ export default {
       const s = this.settings.skipSeconds
       return s >= 100 ? '99+' : String(s)
     },
+    rateOptions () {
+      return PLAYBACK_RATES.map((r) => ({
+        value: r,
+        name: `${r}×`,
+        detail: r === 1 ? 'normal' : r < 1 ? 'slow' : 'fast, muted'
+      }))
+    },
+    rateLabel () { return `${this.state.rate}×` },
     useClock () {
       return this.settings.timeDisplay === 'clock' && this.state.startUtc > 0
     },
@@ -151,13 +220,19 @@ export default {
     },
     showStreamChip () {
       return this.state.hasMainStream && this.state.hasSubStream
+    },
+    streamOptions () { return streamOptions(this.state) },
+    streamChip () { return streamChipLabel(this.state) },
+    currentStreamName () {
+      const cur = this.streamOptions.find((o) => o.value === this.state.streamMode)
+      return cur ? cur.label : this.state.streamMode
     }
   },
   methods: {
     /** The chrome must stay up while *any* of the popups is open. */
     setMenuOpen (which, open) {
       this.openMenus[which] = open
-      this.$emit('menu-open', this.openMenus.settings || this.openMenus.stream)
+      this.$emit('menu-open', Object.values(this.openMenus).some(Boolean))
     }
   }
 }
@@ -224,8 +299,34 @@ export default {
   color: var(--accent);
 }
 
-@media (max-width: 860px) {
+.chip--zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-color: rgba(88, 166, 255, 0.5);
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.chip--zoom:hover {
+  background: rgba(88, 166, 255, 0.18);
+}
+
+@media (max-width: 980px) {
   .readout__frame { display: none; }
+}
+
+@media (max-width: 860px) {
+  .ratemenu { display: none; }
+}
+
+/* No room for the stream chip on a phone, and dropping it here would push the
+   settings and fullscreen buttons off the edge. The same picker lives in the
+   settings panel, which stays reachable. */
+@media (max-width: 620px) {
+  .streammenu { display: none; }
 }
 
 @media (max-width: 620px) {

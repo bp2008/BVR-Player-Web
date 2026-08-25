@@ -36,7 +36,12 @@ function newStreamAccumulator () {
     size: new Growable(Uint32Array),
     ts: new Growable(Float64Array),
     utc: new Growable(Float64Array),
-    flags: new Growable(Uint16Array)
+    flags: new Growable(Uint16Array),
+    // Two more typed arrays per stream, four bytes each per frame. They are what
+    // lets an overlay object's draw conditions (spec 7.1 `stateflags` / `dio`)
+    // be evaluated against any frame without going back to the file.
+    dio: new Growable(Uint32Array),
+    state: new Growable(Uint32Array)
   }
 }
 
@@ -49,6 +54,8 @@ function finishStream (acc) {
     ts: acc.ts.toTyped(),
     utc: acc.utc.toTyped(),
     flags: acc.flags.toTyped(),
+    dio: acc.dio.toTyped(),
+    state: acc.state.toTyped(),
     keyIdx: new Int32Array(count),
     keys: null
   }
@@ -123,9 +130,13 @@ export async function buildIndex (reader, header, { onProgress, shouldStop } = {
       if (next > fileSize) { truncated = true; break }
 
       let utc = 0
+      let dio = 0
+      let stateBits = 0
       if (postbytes >= 16 && at + 32 <= view.byteLength) {
         // Split 64-bit read: unix-ms sits far below 2^53, so this stays exact.
         utc = view.getUint32(at + 20, true) * 4294967296 + view.getUint32(at + 16, true)
+        dio = view.getUint32(at + 24, true)
+        stateBits = view.getUint32(at + 28, true)
       }
 
       if (flags & FLAG_ISHEADER) {
@@ -144,6 +155,10 @@ export async function buildIndex (reader, header, { onProgress, shouldStop } = {
         acc.ts.push(timestamp)
         acc.utc.push(utc)
         acc.flags.push(flags)
+        // On a video frame the union at offset 28 is `state_bits`, never the
+        // audio power float (spec 2.1), so it is safe to keep as an integer.
+        acc.dio.push(dio)
+        acc.state.push(stateBits)
         if (flags & FLAG_MARK) marks.push({ stream: si, idx: acc.offset.length - 1, ts: timestamp, utc })
       }
 

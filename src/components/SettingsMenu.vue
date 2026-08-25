@@ -48,6 +48,19 @@
         </select>
       </label>
 
+      <label class="settings__row">
+        <span class="settings__label">Playback speed</span>
+        <select
+          class="settings__select"
+          :value="state.rate"
+          @change="$emit('rate', Number($event.target.value))"
+          @keydown.stop
+          @dblclick.stop
+        >
+          <option v-for="r in rates" :key="r" :value="r">{{ r }}x{{ r === 1 ? '' : ' (muted)' }}</option>
+        </select>
+      </label>
+
       <label v-if="showStreamPicker" class="settings__row">
         <span class="settings__label">Video stream</span>
         <select
@@ -78,6 +91,23 @@
         />
       </label>
 
+      <template v-if="state.hasMetadata">
+        <label class="settings__row settings__row--toggle">
+          <span class="settings__label">
+            Draw overlays
+            <em class="settings__sub">{{ overlaySummary }}</em>
+          </span>
+          <input
+            type="checkbox"
+            class="settings__check"
+            :checked="state.overlayEnabled"
+            @change="$emit('overlay', { enabled: $event.target.checked })"
+            @keydown.stop
+            @dblclick.stop
+          />
+        </label>
+      </template>
+
       <div class="settings__divider"></div>
 
       <dl class="settings__info">
@@ -106,6 +136,7 @@
 import AppIcon from './AppIcon.vue'
 import { formatBytes, formatUtc } from '../util/format.js'
 import { streamOptions } from '../util/streams.js'
+import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
 
 export default {
   name: 'SettingsMenu',
@@ -114,11 +145,17 @@ export default {
     settings: { type: Object, required: true },
     state: { type: Object, required: true }
   },
-  emits: ['patch', 'stream', 'open-change'],
+  emits: ['patch', 'stream', 'overlay', 'rate', 'open-change'],
   data () {
-    return { open: false }
+    return { open: false, rates: PLAYBACK_RATES }
   },
   computed: {
+    overlaySummary () {
+      const n = this.state.overlayObjects
+      const boxes = this.state.overlayShapes
+      if (!n) return 'no objects at this position'
+      return boxes ? `${n} object(s), ${boxes} box(es) here` : `${n} object(s)`
+    },
     showStreamPicker () {
       return this.state.hasMainStream && this.state.hasSubStream
     },
@@ -217,7 +254,15 @@ export default {
 }
 
 .settings__label {
+  display: flex;
+  flex-direction: column;
   color: var(--text-dim);
+}
+
+.settings__sub {
+  font-size: 10.5px;
+  font-style: normal;
+  opacity: 0.75;
 }
 
 .settings__control {

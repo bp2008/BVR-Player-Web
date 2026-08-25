@@ -18,8 +18,13 @@ const KEY_SAMPLE = 64 << 10
 
 const STREAM_NAMES = ['main', 'sub']
 
-/** Walks frames from the start until the first key frame of each stream is known. */
-async function findFirstKeys (reader, header) {
+/**
+ * Walks frames from the start until the first key frame of each stream is known.
+ *
+ * Exported because a thumbnail wants exactly this and nothing else -- one key
+ * frame, without the decoder-support interrogation the full probe performs.
+ */
+export async function findFirstKeys (reader, header) {
   const fileSize = reader.size
   const scan = new ScanReader(reader.blob, { chunkSize: 1 << 20, depth: 2 })
   const keys = [null, null]
