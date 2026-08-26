@@ -19,11 +19,14 @@ export const DEFAULT_SETTINGS = {
   // but it is a guess, and a guess the viewer can decline.
   matchAspect: true,
 
-  // Scrubbing, both off by default. The key-frame preview is the whole reason a
-  // drag across a long recording keeps up at all, and the short bursts of audio
-  // between seek steps are a cue some viewers navigate by -- so each is offered
-  // rather than chosen.
-  scrubExact: false,
+  // Scrubbing. Exact frames while dragging are on: the picture under the pointer
+  // is the one a drag is looking for, and on the recordings this player is for --
+  // a few seconds between key frames -- decoding up to it keeps up. It is the
+  // setting to turn off where key frames are far enough apart that a drag starts
+  // to lag, which is what the key-frame preview exists for. Pausing while seeking
+  // stays off: the short bursts of audio between seek steps are a cue some
+  // viewers navigate by.
+  scrubExact: true,
   pauseWhileSeeking: false,
 
   // Snapshots. JPEG at 85 is the photographic default; WebP is offered for the

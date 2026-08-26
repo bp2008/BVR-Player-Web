@@ -56,8 +56,22 @@
       <span v-else class="library__count">
         {{ count(task.done) }} so far<span v-if="task.rate"> · {{ count(task.rate) }}/sec</span>
       </span>
-      <button type="button" class="btn btn--ghost" @click="cancelScan">
-        {{ loading ? 'Stop' : 'Cancel' }}
+      <!--
+        Stop, while the folder itself is being read, is commented out rather than
+        removed, because it could not do what its label said. Aborting the
+        `for await` stops this page reading the results; it does not stop Chrome,
+        which finishes enumerating the directory in the browser process whatever
+        the page does — after the tab is closed, and for the hour a large folder
+        on a network share takes. A button that stops nothing is worse than no
+        button. The metadata pass is a loop of this page's own and does stop, so
+        it keeps its Cancel.
+
+        <button type="button" class="btn btn--ghost" @click="cancelScan">
+          {{ loading ? 'Stop' : 'Cancel' }}
+        </button>
+      -->
+      <button v-if="task.cancellable" type="button" class="btn btn--ghost" @click="cancelSizes">
+        Cancel
       </button>
     </div>
 
@@ -83,21 +97,54 @@
             Chrome goes unresponsive while it runs.
           </p>
           <p class="library__hint">
-            Stopping here stops this page reading the results, but Chrome finishes the folder
-            regardless — the rest of the browser stays slow until it does. This folder will not
-            be listed again without being asked for.
+            There is nothing to press: Chrome finishes the folder whether this page waits for it
+            or not, and closing the tab does not call it back. The rest of the browser stays slow
+            until it ends. This folder will not be listed again without being asked for.
           </p>
         </div>
 
-        <button type="button" class="btn" @click="cancelScan">
-          {{ scanIsSlow ? 'Stop' : 'Cancel' }}
-        </button>
+        <!--
+          Same reason as the button on the progress row above: this one offered to
+          stop a directory walk that no page can stop. See `cancelScan`.
+
+          <button type="button" class="btn" @click="cancelScan">
+            {{ scanIsSlow ? 'Stop' : 'Cancel' }}
+          </button>
+        -->
       </div>
 
       <div v-else-if="error" class="library__center">
         <AppIcon name="alert" :size="30" />
         <p class="library__error">{{ error }}</p>
         <button type="button" class="btn" @click="choose">Choose a folder</button>
+      </div>
+
+      <div v-else-if="unfinishedScan" class="library__center">
+        <AppIcon name="alert" :size="30" />
+        <p class="library__lead">{{ dirName }} was still being read when this page last closed</p>
+        <div class="library__stall">
+          <p v-if="unfinishedScan.scanned" class="library__hint">
+            It had reached <strong>{{ count(unfinishedScan.scanned) }} entries</strong><span
+              v-if="unfinishedScan.elapsed"> after {{ duration(unfinishedScan.elapsed) }}</span>,
+            and the end never arrived.
+          </p>
+          <p class="library__hint">
+            So it is not opened again on its own. A folder that takes an hour to list cannot be
+            called off once it starts, and it holds up every tab in the browser while it runs —
+            a page that reopened it on each launch would spend that hour again on the way to
+            recovering from it.
+          </p>
+          <p class="library__hint library__hint--warn">
+            Choose the folder again to have another go, ideally when the drive it lives on is
+            not busy. Nothing else on this page will start it.
+          </p>
+        </div>
+        <div class="library__actions">
+          <button type="button" class="btn btn--accent" @click="choose">
+            <AppIcon name="folder" :size="17" />
+            <span>Choose folder</span>
+          </button>
+        </div>
       </div>
 
       <div v-else-if="slowFolder" class="library__center">
@@ -230,8 +277,9 @@ import {
 } from '../library/directory.js'
 import { ThumbService } from '../library/thumbService.js'
 import {
-  clearListing, clearSlowFolder, getSlowFolder, loadDirectoryHandle, loadListing,
-  markSlowFolder, saveDirectoryHandle, saveListing
+  clearListing, clearScanMark, clearSlowFolder, getSlowFolder, getUnfinishedScan,
+  loadDirectoryHandle, loadListing, markScanStarted, markSlowFolder, saveDirectoryHandle,
+  saveListing
 } from '../library/thumbCache.js'
 
 // Rows kept rendered beyond each edge of the viewport. Enough that a flick of
@@ -284,6 +332,12 @@ const PROGRESS_RENDER_MS = 1000
 const SLOW_AFTER_MS = 12000
 const SLOW_RATE = 400
 
+// How often the "this walk has not finished" record is brought up to date while
+// a folder is being read. It is not shown to anyone until the next page load, so
+// it is written rarely -- often enough to say roughly how far the walk got, and
+// no more.
+const SCAN_MARK_MS = 5000
+
 export default {
   name: 'FolderBrowser',
   components: { AppIcon },
@@ -303,6 +357,9 @@ export default {
       // Set when this folder has already been found ruinous to list, which is
       // the one thing worth remembering about a folder.
       slowFolder: null,
+      // Set when the last walk of this folder was never seen to finish, and so
+      // must not be started again by anything but a deliberate choice.
+      unfinishedScan: null,
       // When the listing on screen came out of the cache rather than the disk.
       listedAt: 0,
       // A directory walk is in progress. Names keep arriving; nothing else about
@@ -440,6 +497,13 @@ export default {
     formatTime,
     displayCamera,
     count (n) { return Number(n || 0).toLocaleString() },
+    /** A rough length in words, for a sentence rather than for a clock. */
+    duration (ms) {
+      const secs = Math.round((ms || 0) / 1000)
+      if (secs < 90) return `${secs} seconds`
+      const mins = Math.round(secs / 60)
+      return mins < 90 ? `${mins} minutes` : `${Math.round(mins / 60)} hours`
+    },
     /** What has been learned by opening the clip, as opposed to reading its name. */
     info (clip) {
       const t = this.thumbOf(clip)
@@ -471,6 +535,17 @@ export default {
       if (!canPickDirectory()) return
       const handle = await loadDirectoryHandle()
       if (!handle) return
+      // Asked before the permission check, and long before anything is read: a
+      // walk this page never saw the end of is the one case where reopening the
+      // last folder is worse than not opening anything. Restoring it would start
+      // an enumeration that cannot be called off, on the folder already known to
+      // take an hour of it -- every launch, for as long as it kept failing. The
+      // handle is deliberately left unset, so the only way on is the picker.
+      this.unfinishedScan = await getUnfinishedScan(handle.name)
+      if (this.unfinishedScan) {
+        this.dirName = handle.name
+        return
+      }
       const state = await directoryPermission(handle, false)
       if (state === 'granted') {
         this.dirHandle = handle
@@ -512,6 +587,10 @@ export default {
       }
       this.dirHandle = picked
       this.dirName = picked.name
+      // Picking a folder by hand is the deliberate choice a refusal was waiting
+      // for, whatever the last walk of it did.
+      this.unfinishedScan = null
+      await clearScanMark(picked.name)
       saveDirectoryHandle(picked)
       await this.refresh()
     },
@@ -519,6 +598,7 @@ export default {
       const files = event.target.files
       if (files && files.length) {
         const entries = entriesFromFileList(files)
+        this.unfinishedScan = null
         this.dirName = this.folderNameOf(files)
         this.dirHandle = null
         this.setEntries(entries)
@@ -560,11 +640,19 @@ export default {
         }
       }
       this.slowFolder = null
+      this.unfinishedScan = null
       this.listedAt = 0
       await clearSlowFolder(this.dirName)
+      // Written before the walk begins rather than when it goes wrong, because
+      // the ways it goes wrong -- the tab closed, the browser killed to get it
+      // back -- are exactly the ones that leave no chance to write anything. The
+      // record is removed below only if the walk returns; one left behind is
+      // what stops this folder being opened again on its own.
+      await markScanStarted(this.dirName)
       const signal = this.newScan()
       this.loading = true
       this.scanning = true
+      this.lastScanMark = Date.now()
       this.lastProgressRender = 0
       this.error = ''
       this.task = { label: 'Reading folder…', done: 0, total: 0 }
@@ -584,9 +672,13 @@ export default {
               elapsed: p.elapsed,
               rate: p.elapsed > 400 ? Math.round(p.scanned / (p.elapsed / 1000)) : 0
             }
+            this.noteScanProgress(p)
             this.showProgress(p.entries)
           }
         })
+        // Only here: the walk reached the end, and this folder is safe to open
+        // by itself again.
+        await clearScanMark(this.dirName)
         this.setEntries(entries)
         if (entries.length) {
           this.listedAt = Date.now()
@@ -627,6 +719,18 @@ export default {
       return (cached.scanned || cached.names.length) <= RELIST_LIMIT
     },
     /**
+     * Keeps the record of the walk in progress roughly current, so that a page
+     * that never sees the end of it still leaves something to say about how far
+     * it got. Throttled hard: this is a note for the next page load, not a
+     * display, and the walk it describes has no throughput to spare.
+     */
+    noteScanProgress (p) {
+      const now = Date.now()
+      if (now - (this.lastScanMark || 0) < SCAN_MARK_MS) return
+      this.lastScanMark = now
+      markScanStarted(this.dirName, { scanned: p.scanned, elapsed: p.elapsed })
+    },
+    /**
      * Puts what has arrived so far on screen, while the rest is still coming.
      *
      * Only the names are available during a scan -- sizes, durations and
@@ -660,6 +764,15 @@ export default {
     },
     cancelScan () {
       if (this.scanCtl) this.scanCtl.abort()
+      if (this.sizeCtl) this.sizeCtl.abort()
+    },
+    /**
+     * The metadata pass only, which is the only one of the two a button can
+     * honestly offer to stop -- see the commented-out Stop in the template.
+     * Aborting the directory walk as well would abandon a listing that is still
+     * arriving and still cost the browser the rest of the enumeration anyway.
+     */
+    cancelSizes () {
       if (this.sizeCtl) this.sizeCtl.abort()
     },
     setEntries (entries) {
@@ -701,11 +814,16 @@ export default {
       if (this.hydratedAll || !this.all.length) return
       const signal = this.newSizeScan()
       const label = 'Reading file sizes…'
-      this.task = { label, done: 0, total: this.all.length }
+      // `cancellable` because this one is: it is a loop of this page's own, and
+      // unlike the directory walk it stops when it is told to.
+      this.task = { label, done: 0, total: this.all.length, cancellable: true }
       try {
         await hydrateAll(this.all, {
           signal,
-          onProgress: (done, total) => { this.task = { label, done, total }; this.bump() }
+          onProgress: (done, total) => {
+            this.task = { label, done, total, cancellable: true }
+            this.bump()
+          }
         })
         this.hydratedAll = true
       } catch {

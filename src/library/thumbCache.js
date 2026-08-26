@@ -240,3 +240,33 @@ export async function getSlowFolder (name) {
 export async function clearSlowFolder (name) {
   await run(HANDLES, 'readwrite', (store) => store.delete(SLOW_KEY(name)))
 }
+
+/**
+ * Folder walks that were started and never seen to finish.
+ *
+ * A directory enumeration cannot be called off: Chrome's browser process works
+ * through it whatever this page does, and on a six-figure folder over a network
+ * share that is an hour of every tab being unresponsive, with killing the
+ * browser the only way out. A page that reopened the last folder on every launch
+ * would therefore start that hour again on the way to recovering from it -- the
+ * one failure that repairs itself only by not being retried.
+ *
+ * So the walk is recorded before it starts and the record is removed only when
+ * the walk returns. A record left behind means the folder is not opened again
+ * without being asked for by name. Kept indefinitely, unlike the slow-folder
+ * note: a walk nobody saw the end of is a fact about that folder, not about how
+ * busy the disk was at the time.
+ */
+const SCAN_KEY = (name) => `scan:${name || ''}`
+
+export async function markScanStarted (name, detail = {}) {
+  await run(HANDLES, 'readwrite', (store) => store.put({ ...detail, at: Date.now() }, SCAN_KEY(name)))
+}
+
+export async function getUnfinishedScan (name) {
+  return run(HANDLES, 'readonly', (store) => store.get(SCAN_KEY(name)))
+}
+
+export async function clearScanMark (name) {
+  await run(HANDLES, 'readwrite', (store) => store.delete(SCAN_KEY(name)))
+}

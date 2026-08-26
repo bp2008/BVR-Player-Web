@@ -18,7 +18,7 @@ BVR-Player-Web. For what the app is and how to drive it, see
 The skip interval (default 10 s), whether a recording starts playing when it is
 opened (it does), time display (elapsed or wall clock), loop, playback speed,
 overlay drawing, whether scrubbing decodes the exact frame rather than the
-nearest key frame, whether playback pauses while you seek, and — for dual-stream
+nearest key frame (it does), whether playback pauses while you seek, and — for dual-stream
 recordings — the main/sub stream selection and whether the two are shown in the
 same shape, all live in the settings panel and persist in the web browser's
 `localStorage`.
@@ -46,11 +46,15 @@ at once where the size does not.
 
 ### Seeking and scrubbing
 
-Dragging the scrub bar shows the nearest key frame as you go, which is what lets
-a drag keep up on an hour-long recording; letting go settles on the exact frame
-under the pointer. Frames keep arriving for as long as you hold the pointer down
-— a picture already being decoded is never thrown away to chase a newer position,
-because seeing every few frames of what you dragged past beats seeing none of it.
+Dragging the scrub bar decodes the frame under the pointer, which is the picture
+a drag is looking for; letting go settles on it either way. **Exact frame while
+scrubbing** is on by default and is the setting to turn off where key frames are
+far enough apart that a drag starts to lag — off, the drag shows the nearest key
+frame instead, which costs no decoding at all and is what lets a drag keep up on
+a recording with minutes between key frames. Frames keep arriving for as long as
+you hold the pointer down — a picture already being decoded is never thrown away
+to chase a newer position, because seeing every few frames of what you dragged
+past beats seeing none of it.
 
 ### Playback speed
 
@@ -269,6 +273,27 @@ rather than exceptional.
   after a day. A slow reading almost always means the disk was busy at that
   moment, not that the folder is beyond reach, so the panel says so and offers to
   try again.
+
+  **A walk nobody saw the end of is a refusal.** The walk is recorded before it
+  starts (`markScanStarted`) and the record removed only when `listDirectory`
+  returns; anything else — the panel closed, the tab closed, Chrome killed from
+  Task Manager to get the machine back — leaves the record behind. On the next
+  launch `restore` finds it and stops there: the folder is named, the directory
+  handle is deliberately not adopted, and the only way on is to pick the folder
+  from the picker again. Reopening it automatically would start the same
+  hour-long enumeration on the way to recovering from it, every launch, for as
+  long as it kept failing — the one failure that repairs itself only by not being
+  retried. Unlike the slow-folder note this one does not expire: it is a fact
+  about that folder, not about how busy the disk was at the time.
+
+  **There is no Stop.** The button that offered one is commented out in
+  `FolderBrowser` rather than deleted, with the reason beside it, because the
+  question comes up again every time someone watches the spinner. Aborting the
+  `for await` stops this page reading the results and nothing else: Chrome
+  finishes the directory whatever the page does, so a Stop button would report
+  the browser as recovered while it was still an hour from it. What genuinely
+  does stop — the bulk metadata pass behind the size sort, which is a loop of
+  this page's own — keeps its Cancel.
 
   `<input webkitdirectory>` is not a way out. It is a genuinely different code
   path, but it cannot be interrupted once a folder is chosen, and on this folder
