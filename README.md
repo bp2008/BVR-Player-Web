@@ -10,8 +10,7 @@ When opening a folder of files, *the browser may say* it is going to upload file
 https://bp2008.github.io/BVR-Player-Web/
 
 Open the player, then drag a `.bvr` file onto the page or press **Open**. Press
-**Browse** to page through a whole folder of recordings with thumbnails —
-including folders with six figures of files in them.
+**Browse** to page through a whole folder of recordings with thumbnails.
 
 Also includes a folder browser with thumbnails.
 
