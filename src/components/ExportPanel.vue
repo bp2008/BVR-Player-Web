@@ -371,7 +371,7 @@ export default {
         header: this.context.header,
         index: this.context.index,
         pstream: this.context.pstream,
-        plan: { ...plan, decoderConfig: this.context.decoderConfig },
+        plan: { ...plan, decoderConfigs: this.context.decoderConfigs },
         sink,
         onProgress: (p) => { this.progress = p.progress; this.stage = p.stage }
       })

@@ -19,6 +19,17 @@
   >
     <div class="seekbar__hit"></div>
     <div class="seekbar__rail">
+      <!-- Which stream has pictures where. Only drawn when the two streams
+           actually differ, since on an ordinary recording they do not. -->
+      <div v-if="covBands.length" class="seekbar__cov">
+        <div
+          v-for="(band, i) in covBands"
+          :key="'c' + i"
+          :class="['seekbar__cov-band', 'seekbar__cov-band--' + band.kind]"
+          :style="{ left: band.left + '%', width: band.width + '%' }"
+        ></div>
+      </div>
+
       <!-- The trim range dims everything outside it, so the selection reads as
            the part of the recording that will be kept. -->
       <template v-if="trim">
@@ -72,12 +83,25 @@
       v-if="hoverRatio !== null && duration > 0"
       class="seekbar__tip"
       :style="{ left: hoverRatio * 100 + '%' }"
-    >{{ formatTime(hoverRatio * duration, false) }}</div>
+    >{{ formatTime(hoverRatio * duration, false) }}<span
+      v-if="hoverCoverage"
+      class="seekbar__tip-note"
+    >{{ hoverCoverage }}</span></div>
   </div>
 </template>
 
 <script>
 import { formatTime } from '../util/format.js'
+
+/** Whether a coverage list holds `t`. Lists are short and already in order. */
+function within (list, t) {
+  if (!list) return false
+  for (const iv of list) {
+    if (iv.start > t) return false
+    if (t < iv.end) return true
+  }
+  return false
+}
 
 export default {
   name: 'SeekBar',
@@ -86,6 +110,7 @@ export default {
     duration: { type: Number, default: 0 },
     marks: { type: Array, default: () => [] },
     segments: { type: Array, default: () => [] },
+    coverage: { type: Object, default: null },
     trim: { type: Object, default: null }
   },
   emits: ['seek', 'scrubbing', 'trim'],
@@ -104,6 +129,56 @@ export default {
      */
     markTicks () { return this.ticks(this.marks) },
     segmentTicks () { return this.ticks(this.segments) },
+    /**
+     * The rail, banded by which stream has pictures there.
+     *
+     * Three states, not four: a stretch the main stream covers is drawn light
+     * whether or not the sub stream covers it too, because what the viewer is
+     * being told is where the better picture exists. Sub-stream-only is the
+     * plain rail, and a stretch neither stream reaches is darkened. Nothing
+     * assumes main coverage is a subset of sub coverage -- it usually is, but a
+     * recording whose sub stream dropped out reads correctly the other way
+     * round, with a light band over a dark one.
+     *
+     * Bands are emitted for the light and dark states only; the plain rail is
+     * what shows through in between.
+     */
+    covBands () {
+      const cov = this.coverage
+      if (!cov || !cov.informative || !this.duration) return []
+      const edges = new Set([0, this.duration])
+      for (const list of [cov.main, cov.sub]) {
+        for (const iv of (list || [])) {
+          if (iv.start > 0 && iv.start < this.duration) edges.add(iv.start)
+          if (iv.end > 0 && iv.end < this.duration) edges.add(iv.end)
+        }
+      }
+      const xs = [...edges].sort((a, b) => a - b)
+      const runs = []
+      for (let i = 0; i + 1 < xs.length; i++) {
+        const mid = (xs[i] + xs[i + 1]) / 2
+        const kind = within(cov.main, mid) ? 'main' : within(cov.sub, mid) ? 'sub' : 'none'
+        const last = runs[runs.length - 1]
+        if (last && last.kind === kind) last.end = xs[i + 1]
+        else runs.push({ start: xs[i], end: xs[i + 1], kind })
+      }
+      return runs
+        .filter((r) => r.kind !== 'sub')
+        .map((r) => ({
+          kind: r.kind,
+          left: (r.start / this.duration) * 100,
+          width: ((r.end - r.start) / this.duration) * 100
+        }))
+    },
+    /** What the hover tooltip adds about the position under the pointer. */
+    hoverCoverage () {
+      const cov = this.coverage
+      if (!cov || !cov.informative || this.hoverRatio === null || !this.duration) return ''
+      const at = this.hoverRatio * this.duration
+      if (within(cov.main, at)) return within(cov.sub, at) ? ' main + sub' : ' main only'
+      if (within(cov.sub, at)) return ' sub only'
+      return ' no video'
+    },
     trimStartPct () {
       if (!this.trim || !this.duration) return 0
       return Math.min(100, Math.max(0, (this.trim.start / this.duration) * 100))
@@ -253,6 +328,31 @@ export default {
   background: rgba(255, 255, 255, 0.28);
 }
 
+/* Clipped to the rail so the end bands follow its rounded ends; the knob and
+   the tick marks sit outside this layer and keep their overflow. */
+.seekbar__cov {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.seekbar__cov-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.seekbar__cov-band--main {
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.seekbar__cov-band--none {
+  background: rgba(0, 0, 0, 0.45);
+}
+
 .seekbar__outside {
   background: rgba(0, 0, 0, 0.55);
   z-index: 2;
@@ -344,5 +444,9 @@ export default {
   color: #e8eaed;
   pointer-events: none;
   white-space: nowrap;
+}
+
+.seekbar__tip-note {
+  color: #9aa0a6;
 }
 </style>

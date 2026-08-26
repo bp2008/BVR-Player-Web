@@ -3,8 +3,9 @@ import { parseFileHeader } from '../bvr/parseFileHeader.js'
 import { buildIndex, frameIndexForTime } from '../bvr/indexer.js'
 import { probeVideoStreams, probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
 import {
-  buildPlaybackStream, resolveStreamMode, estimateFrameInterval, collectMarkers
+  autoStreamSources, buildPlaybackStream, resolveStreamMode, estimateFrameInterval, collectMarkers
 } from './playbackStream.js'
+import { fileCoverage, gapThreshold } from './coverage.js'
 import { VideoPipeline } from './VideoPipeline.js'
 import { AudioPipeline } from './AudioPipeline.js'
 import { MetadataPipeline } from './MetadataPipeline.js'
@@ -70,6 +71,12 @@ export function createBlankState () {
     hasSubStream: false,
     hasMainStream: false,
     switchingMode: false,
+    // Which of the file's streams `auto` will actually draw on, in preference
+    // order. One entry means auto settles on a single stream; two means it
+    // switches between them. The stream menu labels itself from this.
+    autoStreams: [],
+    // Where each stream has pictures, for the scrub bar. See coverage.js.
+    coverage: null,
     // The size each stream's pictures actually are, read from the bitstream.
     mainWidth: 0,
     mainHeight: 0,
@@ -157,6 +164,10 @@ export class BvrPlayer {
     this.streamMode = 'auto'
     this.matchAspect = true
     this.frameIntervalMs = 33.367
+    this.duration = 0
+    // How long each of the file's streams may go without a frame before that is
+    // a hole to be skipped rather than a slow frame rate; see coverage.js.
+    this.gapBySource = [0, 0]
 
     this.curIdx = -1
     this.pendingSeek = null
@@ -260,7 +271,9 @@ export class BvrPlayer {
         // the bitstream's own and are left alone.
         hasMainStream: this.index.streams[0].count > 0,
         hasSubStream: this.index.streams[1].count > 0,
-        switchingMode: this.index.switchingMode
+        switchingMode: this.index.switchingMode,
+        autoStreams: autoStreamSources(this.index, this.header, this._playable(), this._probedSizes()),
+        coverage: fileCoverage(this.index, this._headerIntervalMs())
       })
 
       this._start()
@@ -278,7 +291,7 @@ export class BvrPlayer {
     const wasPlaying = this._state.playing
     const atTime = initial ? 0 : this.clock.currentTime
 
-    const playable = [this._streamPlayable(0), this._streamPlayable(1)]
+    const playable = this._playable()
     const effective = resolveStreamMode(this.index, playable, mode)
     this.streamMode = effective
 
@@ -287,8 +300,10 @@ export class BvrPlayer {
 
     const codecInfo = this._codecFor(pstream)
     if (!codecInfo) throw new Error('The selected stream could not be identified.')
-    if (codecInfo.kind === 'unsupported') {
-      throw new Error(`Unsupported video codec: ${codecInfo.label}. Browsers cannot decode this stream.`)
+    const unsupported = (codecInfo.bySource ? Object.values(codecInfo.bySource) : [codecInfo])
+      .find((c) => c && c.kind === 'unsupported')
+    if (unsupported) {
+      throw new Error(`Unsupported video codec: ${unsupported.label}. Browsers cannot decode this stream.`)
     }
 
     // How much input each stream's decoder wanted, kept across a switch.
@@ -312,7 +327,17 @@ export class BvrPlayer {
     this.video.setScrubbing(this.scrubbing)
     this.renderer.forget()
 
-    const duration = pstream.ts[pstream.count - 1] + this.frameIntervalMs
+    // The timeline is the recording's, not the selected stream's.
+    //
+    // A file whose main stream covers twenty minutes of an hour is still an hour
+    // long: its audio runs the whole way, its sub stream runs the whole way, and
+    // a scrub bar that shrank to twenty minutes when the main stream was picked
+    // would be describing the stream rather than the recording -- with no way to
+    // see, or reach, the fifty minutes the other stream has. So every mode
+    // shares one duration and the coverage banding says what is where.
+    const duration = Math.max(pstream.ts[pstream.count - 1], this.index.durationMs) + this.frameIntervalMs
+    this.duration = duration
+    this._sizeGaps()
     const { marks, segments } = collectMarkers(this.index)
     this._emit({
       duration,
@@ -423,21 +448,95 @@ export class BvrPlayer {
     return p ? p.supported : true
   }
 
-  /** The decoder configuration for a playback stream, from the probe. */
+  _playable () {
+    return [this._streamPlayable(0), this._streamPlayable(1)]
+  }
+
+  /** The header's nominal frame interval in ms, as a last-resort fallback. */
+  _headerIntervalMs () {
+    const us = this.header ? this.header.frameInterval : 0
+    return us > 0 ? us / 1000 : 40
+  }
+
+  /**
+   * The decoder configuration for a playback stream, from the probe.
+   *
+   * A merged sequence carries one per source stream, because the pipeline runs
+   * one decoder per source stream: main and sub need not share a codec, and even
+   * when they do they do not share a resolution, so a decoder each is both
+   * simpler and more accurate than one decoder reconfigured on the fly.
+   */
   _codecFor (pstream) {
-    const probed = this.probe && this.probe.streams[pstream.codecSource]
-    if (!probed) return null
-    const info = probed.codec
-    if (info.kind !== 'video' || !pstream.variableResolution) return info
-    // A switching-mode sequence carries both resolutions; configure for the larger.
-    return {
-      ...info,
-      config: {
-        ...info.config,
-        codedWidth: pstream.width || undefined,
-        codedHeight: pstream.height || undefined
-      }
+    const sources = pstream.sources || [pstream.codecSource]
+    const primary = this.probe && this.probe.streams[pstream.codecSource]
+    if (!primary) return null
+    if (sources.length < 2) return primary.codec
+
+    const bySource = []
+    for (const si of sources) {
+      const probed = this.probe.streams[si]
+      if (!probed) return null
+      bySource[si] = probed.codec
     }
+    return { ...primary.codec, bySource }
+  }
+
+  /**
+   * How long each stream may go without a frame before playback should jump the
+   * hole rather than sit on the last picture.
+   *
+   * Per source, because the whole point is that the two streams can run at
+   * wildly different rates -- and in a merged sequence the frame before a hole
+   * and the frame after it may belong to different streams. A hole is only
+   * skipped when it is longer than what *both* of those streams call ordinary,
+   * which is the conservative reading and the one that never fast-forwards
+   * through a slow stream.
+   */
+  _sizeGaps () {
+    const fallback = this._headerIntervalMs()
+    this.gapBySource = [
+      gapThreshold(this.index.streams[0], fallback),
+      gapThreshold(this.index.streams[1], fallback)
+    ]
+  }
+
+  _gapAfter (i) {
+    const s = this.pstream
+    const a = s.srcStream ? s.srcStream[i] : s.codecSource
+    const b = s.srcStream ? s.srcStream[Math.min(i + 1, s.count - 1)] : a
+    return Math.max(this.gapBySource[a] || 0, this.gapBySource[b] || 0)
+  }
+
+  /**
+   * Moves the playhead across a stretch the sequence being played has no
+   * pictures for.
+   *
+   * A continuous-sub, motion-triggered-main recording played on `main` alone is
+   * mostly hole: the first picture may be twenty minutes in and the last twenty
+   * minutes from the end. Left alone the player sits on one frame while the
+   * audio runs, which looks exactly like a decoder that has given up. Jumping to
+   * the next picture that exists is both what is wanted and what the scrub bar's
+   * coverage banding has already told the viewer to expect.
+   *
+   * The wait before jumping is half the gap threshold, so a stream with a slow
+   * but steady rate is never hurried along -- by construction its ordinary
+   * spacing is well inside the threshold, so this cannot fire on it at all.
+   */
+  _skipEmptyStretch () {
+    const s = this.pstream
+    if (!s || s.count === 0) return false
+    const t = this.clock.currentTime
+
+    const lead = this._gapAfter(0)
+    if (lead > 0 && t < s.ts[0] - lead / 2) { this.seek(s.ts[0]); return true }
+
+    const i = frameIndexForTime(s, t)
+    if (i < 0 || i >= s.count - 1) return false
+    const gap = this._gapAfter(i)
+    if (!gap || s.ts[i + 1] - s.ts[i] <= gap) return false
+    if (t - s.ts[i] <= gap / 2) return false
+    this.seek(s.ts[i + 1])
+    return true
   }
 
   async _probeMissedStreams () {
@@ -601,6 +700,8 @@ export class BvrPlayer {
     this.curIdx = -1
     this.pendingSeek = null
     this.scrubTarget = null
+    this.duration = 0
+    this.gapBySource = [0, 0]
     this._metaAt = null
     this.clock.setWallSource(performanceWall)
     this.clock.pause()
@@ -684,8 +785,7 @@ export class BvrPlayer {
    */
   seek (ms, { preview = false } = {}) {
     if (!this.pstream) return
-    const s = this.pstream
-    const t = clamp(ms, 0, Math.max(0, s.ts[s.count - 1]))
+    const t = clamp(ms, 0, Math.max(0, this.duration - this.frameIntervalMs))
     this.clock.currentTime = t
     this.ended = false
     this._emit({ currentTime: t, ended: false })
@@ -868,11 +968,24 @@ export class BvrPlayer {
       // The shape the picture is being shown in, so an export comes out looking
       // like what was on screen. Null when the correction is switched off.
       reference: this._referenceShape(),
-      // The probe already settled this against a real key frame, and it is what
-      // a transcode has to configure its decoder with.
-      decoderConfig: this.codecInfo && this.codecInfo.kind === 'video' ? this.codecInfo.config : null,
+      // The probe already settled these against real key frames, and they are
+      // what a transcode has to configure its decoders with -- one per source
+      // stream, since a merged sequence may hold two codecs.
+      decoderConfigs: this._decoderConfigs(),
       audioStarts: this.audio ? this.audio.packetStartMs : null
     }
+  }
+
+  /** Decoder configuration per source stream, sparse by stream id. */
+  _decoderConfigs () {
+    const info = this.codecInfo
+    if (!info || !this.pstream) return null
+    const out = []
+    for (const si of (this.pstream.sources || [this.pstream.codecSource])) {
+      const codec = (info.bySource && info.bySource[si]) || info
+      out[si] = codec.kind === 'video' ? codec.config : null
+    }
+    return out
   }
 
   // ----------------------------------------------------------------- internal
@@ -971,7 +1084,7 @@ export class BvrPlayer {
       if (this._state.buffering) this._emit({ buffering: false })
     }
 
-    if (!this.scrubbing && this.clock.playing) {
+    if (!this.scrubbing && this.clock.playing && !this._skipEmptyStretch()) {
       const t = this.clock.currentTime
       const target = frameIndexForTime(s, t)
       if (target > this.curIdx) {
@@ -985,9 +1098,11 @@ export class BvrPlayer {
           if (!this._state.buffering) this._emit({ buffering: true })
         }
       }
-      const lastTs = s.ts[s.count - 1]
-      if (this.curIdx >= s.count - 1 && t > lastTs + this.frameIntervalMs) {
-        this.clock.currentTime = lastTs + this.frameIntervalMs
+      // The recording ends where the recording ends, which on a stream that
+      // stops early is past its own last frame; the picture stays up while the
+      // rest of the audio plays out.
+      if (t >= this.duration) {
+        this.clock.currentTime = this.duration
         this.pause()
         this.ended = true
         this._emit({ ended: true, currentTime: this.clock.currentTime })

@@ -39,15 +39,6 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |
 
-<kbd>Esc</kbd> closes whichever panel is open; with none open it goes back to the
-folder you were browsing.
-
-<kbd>Space</kbd> always means play/pause, whatever has keyboard focus at the
-time — a button you clicked a moment ago does not get a second click out of it.
-Buttons, checkboxes and the rest are still activated from the keyboard with
-<kbd>Enter</kbd>. The exception is a field you type into, where a space is a
-space.
-
 ## More
 
 - [Development.md](Development.md) — building, architecture, and how each

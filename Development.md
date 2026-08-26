@@ -84,6 +84,53 @@ never hidden behind a panel.
 
 Panels stay open when the next recording is opened.
 
+### Streams that cover different parts of the recording
+
+A Blue Iris recording need not hold both of its streams for its whole length.
+The arrangement that makes this matter is continuous sub-stream recording with a
+motion-triggered main stream: an hour-long file whose sub stream runs end to end
+and whose main stream exists in a handful of islands totalling a few minutes.
+The two streams do not have to share a codec either — H.265 main alongside H.264
+sub is ordinary — and their frame rates can differ by a factor of sixty.
+
+**Auto** plays the best picture available at each moment, switching between the
+streams as their coverage comes and goes. "Best" means the largest picture, read
+from the bitstream rather than from the header, so a recording that happens to
+carry the bigger picture on its sub stream is played from the sub stream. Each
+stream gets its own decoder, which is what lets the two carry different codecs.
+
+Coverage is worked out from the frames rather than from the MAINAVAILABLE flag,
+because the question is about stretches of time and the flag answers it one frame
+at a time. A stream counts as absent only once it has gone without a frame for
+several times its own typical spacing — so a main stream recorded at half a frame
+per second beside a 30 fps sub stream reads as continuously present, and is
+played continuously, rather than flickering between resolutions twice a second.
+Stretches shorter than a couple of seconds are not worth a switch either way and
+are absorbed into their neighbours, so a brief flash of main stream costs nothing
+and a sub stream that starts a quarter-second before the main one goes unnoticed.
+
+Switches land on a key frame of the stream being switched to, and preferably the
+one just *before* the changeover, so the outgoing stream plays right up to where
+the incoming one begins and the picture never freezes across a switch.
+
+**Main** and **Sub** still play exactly the stream named. Where that stream has
+nothing — before its first frame, or across a hole — playback skips forward to
+the next picture that exists rather than sitting on a still frame while the audio
+runs on. The timeline is the recording's either way, not the selected stream's:
+a file whose main stream covers twenty minutes of an hour is still an hour long,
+and both the audio and the other stream are still there to be reached.
+
+Where the two streams differ, the scrub bar says so. Stretches with main-stream
+video are drawn light, stretches with only the sub stream are the plain rail, and
+stretches with neither are darkened; hovering names which it is. Nothing assumes
+the main stream is the sparser of the two, so a recording whose *sub* stream
+dropped out reads correctly the other way round. On the ordinary recording whose
+streams cover the same hour, the banding is not drawn at all.
+
+An `auto` sequence built from two streams cannot be copied into an MP4 — one
+track holds one codec, and one resolution — so exporting it re-encodes, and the
+export panel says to pick main or sub on its own to copy frames instead.
+
 ### Streams of the wrong shape
 
 Blue Iris writes into every recording the resolution it asked each camera for.
@@ -127,7 +174,11 @@ shown — without the letterboxing, and without the digital-zoom crop, so a
 snapshot taken while zoomed in still holds every pixel the recording has.
 
 Files are named after the recording and the frame's own UTC, to the millisecond:
-`hillsidedrivet.20260824_203945.310Z.jpg`. The format is JPEG at 85% quality by
+`hillsidedrivet.20260824_203945.310Z.jpg`. That holds whichever way the
+recording itself was named — a clip downloaded through UI3 arrives as
+`Front Wide 2026-08-25 05.00.00 PM.bvr` and its stills come out as
+`Front Wide.20260825_230145.310Z.jpg`, so a folder of stills sorts by camera and
+moment however they were collected. The format is JPEG at 85% quality by
 default; both the format (WebP is offered where the browser can encode it) and
 the quality are in the settings panel.
 
@@ -155,6 +206,20 @@ works. Opening one file at a time is unaffected.
 The filter box matches on the file name, which is also where the camera name
 lives, and the sort menu offers newest, oldest, name, camera and largest first.
 Time-ordered views are broken into day headings; the others are one flat run.
+
+Two naming conventions are recognised, because a folder of downloads is as
+ordinary a thing to browse as a folder of recordings:
+
+| | Example | Time is |
+|---|---|---|
+| Blue Iris storage | `hillsidedrivet.20260824_203931Z.bvr` | UTC (the trailing `Z`) |
+| UI3 download | `Front Wide 2026-08-25 05.00.00 PM.bvr` | the server's local time |
+
+The UI3 form keeps the camera under its configured name, spaces and all, and
+carries no zone marker of any kind — so it is read as local time, which is what
+it is. A 24-hour clock and the browser's `(2)` duplicate suffix are both
+accepted. A name that matches neither is listed under its whole name with no
+date, which sorts to the end of a newest-first listing.
 
 #### Folders with six figures of recordings in them
 
@@ -402,9 +467,12 @@ ways:
 - **Re-encode** — decode and encode again, which trims exactly and can change
   codec, bitrate, resolution and frame rate.
 
-A stream copy is refused for a switching-mode recording, and the panel explains
-why: a resolution change mid-stream is what MP4 tolerates poorly, so the user is
-pointed at the single-stream selection instead.
+A stream copy is refused for a sequence built from both streams, and the panel
+explains why: one MP4 track holds one codec and one resolution, and a switching
+sequence offers neither. The user is pointed at the single-stream selection
+instead. A re-encode handles it either way, running a decoder per source stream
+into one encoder and draining each before the other takes over, so the output
+follows exactly the sequence that was on screen.
 
 The range is set by dragging the handles on the scrub bar, by the **start here**
 and **end here** buttons, or by typing either timestamp into the panel. The
@@ -508,9 +576,17 @@ src/components/  Vue 3 UI (Options API)
   stream that has no decoder.
 - **Decoding.** Key frames carry their own parameter sets, so a
   `VideoDecoderConfig` is derived from the first key frame by parsing the SPS for
-  profile/tier/level. Chunks are fed to `VideoDecoder` in Annex-B form. Switching
-  mode merges main and sub into one sequence only when both go through the same
-  decoder — same codec, and both decodable here.
+  profile/tier/level. Chunks are fed to `VideoDecoder` in Annex-B form.
+- **Stream coverage and switching.** `src/player/coverage.js` reads from the
+  frame table where each stream actually has pictures, and turns that into the
+  plan `auto` plays: which stream is preferred at each moment, and the runs of
+  frames the merged sequence is built from. A run is always a contiguous slice of
+  one stream's frame table opening on a key frame, which is the only shape a
+  decoder will accept; key-frame back-references never cross a run boundary, so a
+  seek restarts the right decoder on the right stream. `VideoPipeline` keeps one
+  decoder per source stream, routed per frame, which is what lets the two carry
+  different codecs — and drains the outgoing one at each changeover, or the
+  pictures it is still holding would never be handed over.
 - **Frame window.** Decoded pictures are copied into `ImageBitmap`s and kept in a
   window around the current position. The copy matters: a hardware decoder owns a
   small pool of output pictures and stalls once an application holds more than a
@@ -717,6 +793,30 @@ What a stream's decoder turned out to want is remembered per stream for as long
 as the file is open, so switching between main and sub does not pay for the
 discovery twice. It looked like the decoder was being left dirty by a switch; it
 was the measurement being thrown away with the old pipeline.
+
+### The frame window is sized once and then left alone
+
+A sequence that switches between a 5120×1440 main stream and a 1904×536 sub
+stream has pictures ten times apart in area, and the obvious refinement — size
+the window from whichever stream is playing, so the sub stream gets the two dozen
+frames of look-ahead it fits in rather than the four the main stream allows — is
+wrong, in a way worth writing down because it looked so reasonable.
+
+The window and the feed allowance above are two ends of one invariant: nothing is
+fed that the window will not have room for by the time it comes back. Re-size the
+window mid-flight and the invariant breaks. Shrinking it — which is what crossing
+into the larger stream does — leaves pictures already inside the decoder outside
+the new bound, and they are dropped on arrival. They are never decoded again
+either: the feed has moved past them and only a restart goes back, so the
+sequence acquires a hole of exactly the difference between the two windows. In
+practice that was ten missing frames immediately after every switch to the main
+stream, the player waiting forever for the first of them, the clock held, and the
+buffering chip up — the same symptom as the deadlock above and a completely
+different cause.
+
+So the window is sized from the sequence's *largest* picture, once, and a
+handful of frames of look-ahead while the sub stream plays is the price. It is
+the price this pipeline has always paid on a switching-mode recording.
 
 ### Very large files — not done, on purpose
 

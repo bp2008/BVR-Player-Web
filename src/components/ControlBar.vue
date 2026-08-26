@@ -5,6 +5,7 @@
       :duration="state.duration"
       :marks="state.marks"
       :segments="state.segments"
+      :coverage="state.coverage"
       :trim="trim"
       @seek="(ms, preview) => $emit('seek', ms, preview)"
       @scrubbing="(on) => $emit('scrubbing', on)"

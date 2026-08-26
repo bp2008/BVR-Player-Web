@@ -118,12 +118,19 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
   const endMs = clamp(opts.endMs === Infinity ? duration : opts.endMs, startMs, duration)
 
   const fourcc = pstream.fourcc || ''
-  const copyable = canRemux(fourcc) && !pstream.variableResolution
+  const copyable = canRemux(fourcc) && !pstream.variableResolution && !pstream.mixedCodecs
   let mode = opts.mode
 
   if (mode === MODE_REMUX && !canRemux(fourcc)) {
     mode = MODE_TRANSCODE
     warnings.push(`${fourcc || 'This codec'} has no usable MP4 form, so the export re-encodes.`)
+  } else if (mode === MODE_REMUX && pstream.mixedCodecs) {
+    mode = MODE_TRANSCODE
+    warnings.push(
+      'This recording switches between two streams with different codecs, and an ' +
+      'MP4 track holds one. Pick the main or sub stream on its own to copy frames ' +
+      'without re-encoding.'
+    )
   } else if (mode === MODE_REMUX && pstream.variableResolution) {
     mode = MODE_TRANSCODE
     warnings.push(

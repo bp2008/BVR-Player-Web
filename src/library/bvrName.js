@@ -8,21 +8,41 @@
  * durations filling in behind. The header's own UTC is authoritative when a file
  * is actually opened; this is the cheap approximation that makes the listing
  * useful straight away.
+ *
+ * There are two names in circulation for the same recording. The one above is
+ * what Blue Iris writes into its own storage folders. A clip downloaded through
+ * UI3, its web interface, arrives named for a reader rather than for a file
+ * system -- `Front Wide 2026-08-25 05.00.00 PM.bvr` -- with the camera under its
+ * configured name, spaces intact, and a local wall-clock time in place of the
+ * compact UTC stamp. Both are recognised, because a folder of downloads is as
+ * ordinary a thing to browse as a folder of recordings.
  */
 
 // <camera>.<YYYYMMDD>_<HHMMSS>[Z][ suffix ].bvr -- the trailing Z marks UTC,
 // and Blue Iris appends its own suffixes to continuation clips.
 const CLIP = /^(.+?)\.(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(Z?)(?:[._-][^.]*)?\.bvr$/i
 
-export function parseBvrName (fileName) {
-  const name = String(fileName || '')
-  const base = name.replace(/\.bvr$/i, '')
-  const m = CLIP.exec(name)
-  if (!m) return { camera: base, startUtc: 0, isUtc: false, matched: false }
+// <camera> <YYYY-MM-DD> <hh>.<mm>.<ss>[ AM|PM][ (n)].bvr -- UI3's download name.
+// The colons a clock would use are illegal in a Windows file name, so the time
+// is dotted; the trailing `(2)` is what a browser adds when the same clip is
+// downloaded twice. There is no zone marker of any kind, and none is implied:
+// the time is the server's local time, so it is read as local.
+const UI3 = /^(.+?)[ _]+(\d{4})-(\d{2})-(\d{2})[ _]+(\d{1,2})[.\-](\d{2})[.\-](\d{2})(?:[ _]*([AP])\.?M\.?)?(?:[ _]*\(\d+\))?\.bvr$/i
 
-  const [, camera, y, mo, d, h, mi, s, z] = m
-  const isUtc = z.toUpperCase() === 'Z'
-  const parts = [Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)]
+/**
+ * Turns a 12-hour clock reading into a 24-hour one. Noon and midnight are the
+ * two the naive arithmetic gets wrong, and they are exactly the hours a
+ * surveillance clip is most likely to be named for.
+ */
+function hour24 (h, meridiem) {
+  if (!meridiem) return h
+  const pm = meridiem.toUpperCase() === 'P'
+  if (h === 12) return pm ? 12 : 0
+  return pm ? h + 12 : h
+}
+
+function assemble (camera, y, mo, d, h, mi, s, isUtc) {
+  const parts = [Number(y), Number(mo) - 1, Number(d), h, Number(mi), Number(s)]
   const startUtc = isUtc ? Date.UTC(...parts) : new Date(...parts).getTime()
   return {
     camera,
@@ -30,6 +50,28 @@ export function parseBvrName (fileName) {
     isUtc,
     matched: true
   }
+}
+
+export function parseBvrName (fileName) {
+  const name = String(fileName || '')
+  const base = name.replace(/\.bvr$/i, '')
+
+  const m = CLIP.exec(name)
+  if (m) {
+    const [, camera, y, mo, d, h, mi, s, z] = m
+    return assemble(camera, y, mo, d, Number(h), mi, s, z.toUpperCase() === 'Z')
+  }
+
+  const u = UI3.exec(name)
+  if (u) {
+    const [, camera, y, mo, d, h, mi, s, meridiem] = u
+    const hh = hour24(Number(h), meridiem)
+    // A 12-hour reading only goes to 12, and a 24-hour one only to 23. Anything
+    // past that is a name that merely looked like a date.
+    if (hh <= 23) return assemble(camera.trim(), y, mo, d, hh, mi, s, false)
+  }
+
+  return { camera: base, startUtc: 0, isUtc: false, matched: false }
 }
 
 /** A camera name as configured, best-effort: Blue Iris lower-cases the file. */

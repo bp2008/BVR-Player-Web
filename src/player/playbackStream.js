@@ -1,6 +1,7 @@
 import {
-  FLAG_ISKEY, FLAG_MAINAVAILABLE, FLAG_ISDISCONTINUITY, STREAM_MAIN, STREAM_SUB
+  FLAG_ISKEY, FLAG_ISDISCONTINUITY, STREAM_MAIN, STREAM_SUB
 } from '../bvr/constants.js'
+import { planRuns, planSegments } from './coverage.js'
 
 /** Which streams hold frames and can actually be decoded on this device. */
 function usableStreams (index, playable) {
@@ -8,13 +9,6 @@ function usableStreams (index, playable) {
     index.streams[STREAM_MAIN].count > 0 && playable[STREAM_MAIN] !== false,
     index.streams[STREAM_SUB].count > 0 && playable[STREAM_SUB] !== false
   ]
-}
-
-/** One decoder handles one codec, so main and sub can only be merged if they agree. */
-function codecsAgree (header) {
-  const a = header.bmih[STREAM_MAIN]
-  const b = header.bmih[STREAM_SUB]
-  return !a || !b || a.fourcc === b.fourcc
 }
 
 /**
@@ -32,60 +26,131 @@ export function resolveStreamMode (index, playable, requested) {
 }
 
 /**
+ * The playable streams in the order `auto` prefers them: biggest picture first.
+ *
+ * Resolution rather than "main, then sub", because "main" is a label for where a
+ * stream sits in the file and not a promise about what is in it. Nothing stops a
+ * recording from carrying the larger picture on the sub stream, and a viewer who
+ * asked for automatic wants the better picture wherever it happens to live. Ties
+ * go to the main stream, which is what the label means when the two are equal.
+ */
+function rankStreams (index, header, sizes, usable) {
+  const ranked = []
+  for (const si of [STREAM_MAIN, STREAM_SUB]) if (usable[si]) ranked.push(si)
+  return ranked.sort((a, b) => {
+    const A = sizeOf(header, sizes, a)
+    const B = sizeOf(header, sizes, b)
+    return (B.width * B.height) - (A.width * A.height) || a - b
+  })
+}
+
+/**
+ * What `auto` would play, worked out once: the streams in preference order, the
+ * runs of frames the merged sequence is built from, and which streams those runs
+ * actually draw on.
+ *
+ * `used` is often shorter than `ranked`. A file whose two streams cover exactly
+ * the same hour has nothing to switch to, so the plan collapses to the better
+ * stream alone -- which is not a lesser outcome but a better one, because a
+ * single-stream sequence can be copied straight into an MP4 and a merged one
+ * cannot.
+ */
+export function planAuto (index, header, playable = [true, true], sizes = null) {
+  const ranked = rankStreams(index, header, sizes, usableStreams(index, playable))
+  if (ranked.length < 2) return { ranked, runs: [], used: ranked }
+
+  const fallbackMs = header.frameInterval > 0 ? header.frameInterval / 1000 : 40
+  const runs = planRuns(index, planSegments(index, ranked, fallbackMs))
+  const used = ranked.filter((si) => runs.some((r) => r.src === si))
+  return { ranked, runs, used: used.length ? used : ranked.slice(0, 1) }
+}
+
+/** Which streams `auto` will draw on, for the stream menu's labels. */
+export function autoStreamSources (index, header, playable, sizes) {
+  return planAuto(index, header, playable, sizes).used
+}
+
+/**
  * Flattens the file's one or two elementary streams into a single decodable
  * sequence.
  *
- * 'main' / 'sub' pick one stream verbatim. 'auto' additionally implements the
- * switching-mode rule from spec section 5.3: prefer main frames, and use sub
- * frames only where MAINAVAILABLE is clear -- but only when both streams are
- * decodable here and share a codec, since the merged sequence goes through a
- * single decoder.
+ * 'main' / 'sub' pick one stream verbatim. 'auto' plays the best picture
+ * available at each moment: see `coverage.js` for how the switching points are
+ * chosen, and `planRuns` for why the sequence is built out of contiguous slices
+ * of one stream at a time.
+ *
+ * The two streams need not share a codec. Continuous H.264 sub-stream recording
+ * with motion-triggered H.265 main stream is an ordinary Blue Iris
+ * configuration, and it is exactly the file that has the most to gain from
+ * switching -- so the merged sequence records which stream each frame came from
+ * and the pipeline runs a decoder per stream.
  */
 export function buildPlaybackStream (index, header, mode, playable = [true, true], sizes = null) {
-  const [main, sub] = index.streams
   const usable = usableStreams(index, playable)
-  const wantSwitching = mode === 'auto' && index.switchingMode &&
-    usable[STREAM_MAIN] && usable[STREAM_SUB] && codecsAgree(header)
 
-  if (!wantSwitching) {
+  if (mode !== 'auto') {
     let si = mode === 'sub' ? STREAM_SUB : STREAM_MAIN
-    if (mode === 'auto') si = usable[STREAM_MAIN] ? STREAM_MAIN : STREAM_SUB
     const other = si === STREAM_MAIN ? STREAM_SUB : STREAM_MAIN
     // Fall back when the chosen stream is absent or cannot be decoded here.
     if (!usable[si] && (usable[other] || index.streams[si].count === 0)) si = other
     return decorate(index.streams[si], si, header, index, sizes)
   }
 
-  const keep = []
-  for (let i = 0; i < main.count; i++) keep.push({ s: STREAM_MAIN, i, ts: main.ts[i] })
-  for (let i = 0; i < sub.count; i++) {
-    if (sub.flags[i] & FLAG_MAINAVAILABLE) continue
-    keep.push({ s: STREAM_SUB, i, ts: sub.ts[i] })
+  const { ranked, runs, used } = planAuto(index, header, playable, sizes)
+  if (used.length < 2) {
+    // Nothing playable at all still has to return a sequence; the caller reports
+    // the codec problem in its own words.
+    const si = used.length ? used[0]
+      : index.streams[STREAM_MAIN].count > 0 ? STREAM_MAIN : STREAM_SUB
+    return decorate(index.streams[si], si, header, index, sizes, autoLabel(si, ranked))
   }
-  keep.sort((a, b) => a.ts - b.ts || a.s - b.s)
+  return merge(index, header, sizes, runs, used)
+}
 
-  const count = keep.length
+function autoLabel (si, ranked) {
+  return ranked.length > 1
+    ? `Auto (${si === STREAM_SUB ? 'sub' : 'main'})`
+    : (si === STREAM_SUB ? 'Sub stream' : 'Main stream')
+}
+
+/** Concatenates the planned runs into one sequence. */
+function merge (index, header, sizes, runs, used) {
+  let count = 0
+  for (const r of runs) count += r.to - r.from + 1
+
   const out = emptyStream(count)
-  for (let k = 0; k < count; k++) {
-    const { s, i } = keep[k]
-    const src = index.streams[s]
-    out.offset[k] = src.offset[i]
-    out.size[k] = src.size[i]
-    out.ts[k] = src.ts[i]
-    out.utc[k] = src.utc[i]
-    out.flags[k] = src.flags[i]
-    out.dio[k] = src.dio[i]
-    out.state[k] = src.state[i]
-    out.srcStream[k] = s
+  let k = 0
+  for (const r of runs) {
+    const src = index.streams[r.src]
+    for (let i = r.from; i <= r.to; i++, k++) {
+      out.offset[k] = src.offset[i]
+      out.size[k] = src.size[i]
+      out.ts[k] = src.ts[i]
+      out.utc[k] = src.utc[i]
+      out.flags[k] = src.flags[i]
+      out.dio[k] = src.dio[i]
+      out.state[k] = src.state[i]
+      out.srcStream[k] = r.src
+      out.srcIndex[k] = i
+    }
   }
-  computeKeys(out)
+  computeRunKeys(out, runs)
+
+  const shapes = used.map((si) => sizeOf(header, sizes, si))
+  const sourceSizes = []
+  used.forEach((si, n) => { sourceSizes[si] = shapes[n] })
+
   out.mode = 'auto'
-  out.codecSource = STREAM_MAIN
+  out.sources = used
+  out.sourceSizes = sourceSizes
+  out.codecSource = used[0]
   out.streamLabel = 'Auto (main + sub)'
-  out.width = Math.max(sizeOf(header, sizes, 0).width, sizeOf(header, sizes, 1).width)
-  out.height = Math.max(sizeOf(header, sizes, 0).height, sizeOf(header, sizes, 1).height)
-  out.fourcc = header.bmih[0]?.fourcc || header.bmih[1]?.fourcc
-  out.variableResolution = true
+  out.width = Math.max(...shapes.map((s) => s.width))
+  out.height = Math.max(...shapes.map((s) => s.height))
+  out.fourcc = header.bmih[used[0]]?.fourcc || header.bmih[0]?.fourcc || ''
+  out.variableResolution = shapes.some((s) => s.width !== shapes[0].width || s.height !== shapes[0].height)
+  out.mixedCodecs = new Set(used.map((si) => (header.bmih[si] || header.bmih[0])?.fourcc)).size > 1
+  out._index = index
   return out
 }
 
@@ -99,20 +164,40 @@ function emptyStream (count) {
     flags: new Uint16Array(count),
     dio: new Uint32Array(count),
     state: new Uint32Array(count),
+    // Which of the file's streams each frame came from, and where in that
+    // stream it sits. The pipeline needs the first to route the frame to the
+    // right decoder; nothing needs the second yet, but a merged sequence that
+    // cannot say where a frame came from is a debugging dead end.
     srcStream: new Uint8Array(count),
+    srcIndex: new Int32Array(count),
     keyIdx: new Int32Array(count),
     keys: null,
     variableResolution: false,
+    mixedCodecs: false,
+    sources: null,
+    sourceSizes: null,
     codecSource: STREAM_MAIN
   }
 }
 
-function computeKeys (s) {
+/**
+ * Key-frame back-references for a merged sequence, computed inside each run.
+ *
+ * A reference may never cross a run boundary. The frame before a switch belongs
+ * to a different decoder than the frame after it, and a seek that restarted from
+ * "the last key frame" without regard for which stream it belonged to would feed
+ * one decoder the other's pictures.
+ */
+function computeRunKeys (s, runs) {
   const keys = []
-  let last = -1
-  for (let i = 0; i < s.count; i++) {
-    if (s.flags[i] & FLAG_ISKEY) { last = i; keys.push(i) }
-    s.keyIdx[i] = last
+  let k = 0
+  for (const r of runs) {
+    let last = -1
+    const n = r.to - r.from + 1
+    for (let j = 0; j < n; j++, k++) {
+      if (s.flags[k] & FLAG_ISKEY) { last = k; keys.push(k) }
+      s.keyIdx[k] = last
+    }
   }
   s.keys = Int32Array.from(keys)
 }
@@ -132,9 +217,11 @@ function sizeOf (header, sizes, si) {
   }
 }
 
-function decorate (src, si, header, index, sizes) {
+function decorate (src, si, header, index, sizes, label) {
   const bmih = header.bmih[si] || header.bmih[0]
   const size = sizeOf(header, sizes, si)
+  const sourceSizes = []
+  sourceSizes[si] = size
   return {
     count: src.count,
     offset: src.offset,
@@ -145,12 +232,16 @@ function decorate (src, si, header, index, sizes) {
     dio: src.dio,
     state: src.state,
     srcStream: null,
+    srcIndex: null,
     keyIdx: src.keyIdx,
     keys: src.keys,
     variableResolution: false,
+    mixedCodecs: false,
+    sources: [si],
+    sourceSizes,
     codecSource: si,
     mode: si === STREAM_SUB ? 'sub' : 'main',
-    streamLabel: si === STREAM_SUB ? 'Sub stream' : 'Main stream',
+    streamLabel: label || (si === STREAM_SUB ? 'Sub stream' : 'Main stream'),
     width: size.width,
     height: size.height,
     fourcc: bmih?.fourcc || '',

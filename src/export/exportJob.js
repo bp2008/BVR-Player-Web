@@ -408,7 +408,13 @@ export class ExportJob {
     const KEY_INTERVAL_US = 2e6
     let lastKeyUs = -Infinity
 
-    const scaling = plan.outWidth !== plan.width || plan.outHeight !== plan.height
+    // Frames go through a canvas whenever they are not already the output size --
+    // and always for a sequence built from both streams, whose pictures are two
+    // different sizes. An encoder is configured once, for one size, so the
+    // smaller stream's frames have to be drawn up to it rather than handed over
+    // as they decoded.
+    const scaling = plan.outWidth !== plan.width || plan.outHeight !== plan.height ||
+      !!s.variableResolution
     const canvas = scaling ? new OffscreenCanvas(plan.outWidth, plan.outHeight) : null
     const ctx = canvas ? canvas.getContext('2d', { alpha: false }) : null
 
@@ -452,37 +458,56 @@ export class ExportJob {
     }
     encoder.configure(encoderConfig)
 
-    const decoder = new VideoDecoder({
-      output: (frame) => {
-        try {
-          const ts = frame.timestamp
-          // Frames before the requested start are the key-frame lead-in the
-          // decoder needed and nothing more; this is what lets a re-encode trim
-          // exactly where a stream copy cannot.
-          if (ts < startUs || ts > endUs) return
-          if (periodUs > 0) {
-            if (ts + TOLERANCE_US < nextEmitUs) return
-            // Advance along a fixed grid so a source whose frames land a
-            // millisecond either side of the ideal spacing does not push the
-            // target steadily later -- that turns a 15 fps cap into 13.5.
-            // A real gap in the recording resets the grid instead.
-            nextEmitUs = nextEmitUs === -Infinity ? ts + periodUs : nextEmitUs + periodUs
-            if (nextEmitUs + periodUs < ts) nextEmitUs = ts + periodUs
-          }
-          const source = this._scaleFrame(frame, canvas, ctx, plan, ts)
-          const wantKey = ts - lastKeyUs >= KEY_INTERVAL_US
-          if (wantKey) lastKeyUs = ts
-          encoder.encode(source, { keyFrame: wantKey })
-          if (source !== frame) source.close()
-        } catch (e) {
-          failure = failure || e
-        } finally {
-          frame.close()
+    // One decoder per source stream. A merged `auto` sequence can carry H.265
+    // main and H.264 sub, and even when the codecs agree the resolutions do not;
+    // a decoder each is what lets the export follow the same sequence the player
+    // was showing. Draining one before the next takes over keeps the encoder's
+    // input in presentation order across a changeover.
+    const decoders = new Map()
+    const onDecoded = (frame) => {
+      try {
+        const ts = frame.timestamp
+        // Frames before the requested start are the key-frame lead-in the
+        // decoder needed and nothing more; this is what lets a re-encode trim
+        // exactly where a stream copy cannot.
+        if (ts < startUs || ts > endUs) return
+        if (periodUs > 0) {
+          if (ts + TOLERANCE_US < nextEmitUs) return
+          // Advance along a fixed grid so a source whose frames land a
+          // millisecond either side of the ideal spacing does not push the
+          // target steadily later -- that turns a 15 fps cap into 13.5.
+          // A real gap in the recording resets the grid instead.
+          nextEmitUs = nextEmitUs === -Infinity ? ts + periodUs : nextEmitUs + periodUs
+          if (nextEmitUs + periodUs < ts) nextEmitUs = ts + periodUs
         }
-      },
-      error: (e) => { failure = failure || e }
-    })
-    decoder.configure(this._decodeConfig())
+        const source = this._scaleFrame(frame, canvas, ctx, plan, ts)
+        const wantKey = ts - lastKeyUs >= KEY_INTERVAL_US
+        if (wantKey) lastKeyUs = ts
+        encoder.encode(source, { keyFrame: wantKey })
+        if (source !== frame) source.close()
+      } catch (e) {
+        failure = failure || e
+      } finally {
+        frame.close()
+      }
+    }
+
+    const decoderFor = (si) => {
+      let dec = decoders.get(si)
+      if (dec) return dec
+      dec = new VideoDecoder({
+        output: onDecoded,
+        error: (e) => { failure = failure || e }
+      })
+      dec.configure(this._decodeConfig(si))
+      decoders.set(si, dec)
+      return dec
+    }
+    const queued = () => {
+      let n = 0
+      for (const d of decoders.values()) if (d.state === 'configured') n += d.decodeQueueSize
+      return n
+    }
 
     mux.beginChunk(videoTrack)
     const total = plan.endIdx - plan.decodeFrom + 1
@@ -524,17 +549,27 @@ export class ExportJob {
     }
 
     try {
+      let current = -1
       for (let i = plan.decodeFrom; i <= plan.endIdx; i++) {
         this._check()
         if (failure) throw failure
+        const si = s.srcStream ? s.srcStream[i] : s.codecSource
+        if (si !== current) {
+          // Drain the outgoing stream before the incoming one starts, or the
+          // encoder would be handed the tail of one run after the head of the
+          // next and the output would run backwards in time.
+          if (current >= 0) await decoders.get(current).flush()
+          if (failure) throw failure
+          current = si
+        }
         const view = await this.reader.read(s.offset[i], s.size[i])
         const bytes = new Uint8Array(view.buffer, view.byteOffset, s.size[i])
-        decoder.decode(new EncodedVideoChunk({
+        decoderFor(si).decode(new EncodedVideoChunk({
           type: (s.flags[i] & 0x0001) ? 'key' : 'delta',
           timestamp: Math.round(s.ts[i] * 1000),
           data: bytes
         }))
-        while (decoder.decodeQueueSize > DECODE_QUEUE_LIMIT || encoder.encodeQueueSize > ENCODE_QUEUE_LIMIT) {
+        while (queued() > DECODE_QUEUE_LIMIT || encoder.encodeQueueSize > ENCODE_QUEUE_LIMIT) {
           this._check()
           if (failure) throw failure
           await nextTurn()
@@ -542,12 +577,14 @@ export class ExportJob {
         }
         if ((i & 31) === 0) await flushPending(i - plan.decodeFrom)
       }
-      await decoder.flush()
+      for (const dec of decoders.values()) await dec.flush()
       await encoder.flush()
       if (failure) throw failure
       await flushPending(total, true)
     } finally {
-      try { decoder.close() } catch { /* already torn down */ }
+      for (const dec of decoders.values()) {
+        try { dec.close() } catch { /* already torn down */ }
+      }
       try { encoder.close() } catch { /* already torn down */ }
     }
 
@@ -563,10 +600,11 @@ export class ExportJob {
     return new VideoFrame(canvas, { timestamp, alpha: 'discard' })
   }
 
-  _decodeConfig () {
+  _decodeConfig (si) {
     // The same Annex-B configuration playback uses; the probe already settled
     // the codec string against a real key frame.
-    const info = this.plan.decoderConfig
+    const configs = this.plan.decoderConfigs
+    const info = (configs && configs[si]) || this.plan.decoderConfig
     if (info) return info
     throw new Error('No decoder configuration was supplied for the transcode.')
   }

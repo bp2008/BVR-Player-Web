@@ -15,31 +15,42 @@ function playable (state) {
   }
 }
 
-/** What 'auto' actually resolves to, mirroring buildPlaybackStream(). */
-function autoDetail (state) {
+/**
+ * What 'auto' has actually resolved to.
+ *
+ * The player works this out once per file -- it depends on where each stream has
+ * pictures, which only the frame index knows -- and publishes it as
+ * `autoStreams`, the streams auto will draw on in preference order. Reading it
+ * back here is what keeps the menu and the sequence being played from ever
+ * describing the same file differently. Before a file is open there is nothing
+ * to read, so the old resolution-blind guess stands in.
+ */
+function autoSources (state) {
   const ok = playable(state)
-  if (mergesStreams(state)) {
-    return dims(
-      Math.max(state.mainWidth, state.subWidth),
-      Math.max(state.mainHeight, state.subHeight)
-    )
-  }
-  if (ok.main) return dims(state.mainWidth, state.mainHeight)
-  if (ok.sub) return dims(state.subWidth, state.subHeight)
-  return ''
+  const list = Array.isArray(state.autoStreams) ? state.autoStreams.filter((si) => ok[si === 1 ? 'sub' : 'main']) : []
+  if (list.length) return list
+  const guess = []
+  if (ok.main) guess.push(0)
+  if (ok.sub) guess.push(1)
+  return guess
 }
 
-/** Switching mode only merges the two streams when one decoder can take both. */
-function mergesStreams (state) {
-  const ok = playable(state)
-  return !!state.switchingMode && ok.main && ok.sub && state.mainFourcc === state.subFourcc
+const widthOf = (state, si) => (si === 1 ? state.subWidth : state.mainWidth)
+const heightOf = (state, si) => (si === 1 ? state.subHeight : state.mainHeight)
+
+function autoDetail (state) {
+  const list = autoSources(state)
+  if (!list.length) return ''
+  return dims(
+    Math.max(...list.map((si) => widthOf(state, si))),
+    Math.max(...list.map((si) => heightOf(state, si)))
+  )
 }
 
 function autoName (state) {
-  const ok = playable(state)
-  if (mergesStreams(state)) return 'Auto (main + sub)'
-  if (ok.main) return 'Auto (main)'
-  if (ok.sub) return 'Auto (sub)'
+  const list = autoSources(state)
+  if (list.length > 1) return 'Auto (main + sub)'
+  if (list.length === 1) return list[0] === 1 ? 'Auto (sub)' : 'Auto (main)'
   return 'Auto'
 }
 
