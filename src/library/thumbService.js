@@ -12,10 +12,18 @@ import { openEntry } from './directory.js'
  * price of the `file://` deployment -- workers need an origin, and opening
  * `docs/index.html` off disk has none.
  *
- * Work is queued rather than fired all at once, and the queue is a stack: the
- * newest request is served first, because in a scrolling grid it is the one the
- * user is looking at. Requests for rows that have scrolled away are cancelled
- * outright.
+ * Work is queued rather than fired all at once, and the queue is served by
+ * priority: the caller ranks each request by how close to the middle of the
+ * viewport the clip is, and the best rank goes first. Ties go to the newest
+ * request, which is the right answer within one screenful. Requests for rows
+ * that have scrolled away are cancelled outright.
+ *
+ * A plain newest-first stack was the earlier rule, on the reasoning that in a
+ * grid being scrolled the last thing asked for is the thing on screen. That only
+ * holds while every request comes from the same screenful: one row below the
+ * fold, asked for a frame later than a row in the middle of the window, took
+ * priority over it under that rule -- which is what made the order look
+ * arbitrary while the pictures being looked at were still blank.
  *
  * Finished results are kept, but only a windowful of them: each carries an
  * object URL, and a folder of a hundred thousand clips is a folder somebody can
@@ -79,7 +87,7 @@ export class ThumbService {
   constructor () {
     this.queue = []
     // Key -> queued job, so a cancel is a lookup rather than a scan of the
-    // queue. Cancelled jobs are left in the stack and skipped when popped.
+    // queue. Cancelled jobs are left where they are and swept out by `_take`.
     this.jobs = new Map()
     this.active = 0
     this.slots = []
@@ -112,14 +120,22 @@ export class ThumbService {
   /**
    * Queues a clip. Resolves with `{ info, thumbUrl }`, or with `info` alone when
    * no picture could be made.
+   *
+   * `priority` is a rank, lowest served first; see the class comment. Callers
+   * that do not care pass nothing and take their turn in request order.
    */
-  request (entry) {
+  request (entry, priority = 0) {
     const cached = this.get(entry.key)
     if (cached) return Promise.resolve(cached)
     const existing = this.jobs.get(entry.key)
-    if (existing) return existing.promise
+    if (existing) {
+      // Scrolling moves a clip up the list without asking for it again, so a
+      // job already waiting has to be able to become more urgent than it was.
+      if (priority < existing.priority) existing.priority = priority
+      return existing.promise
+    }
 
-    const job = { entry, cancelled: false }
+    const job = { entry, priority, cancelled: false }
     job.promise = new Promise((resolve, reject) => {
       job.resolve = resolve
       job.reject = reject
@@ -150,18 +166,39 @@ export class ThumbService {
     job.resolve(null)
   }
 
+  /**
+   * The most urgent queued job, and the moment cancelled ones are swept out.
+   *
+   * A linear pass, because the queue only ever holds what is near the viewport
+   * -- a screenful and a row either side, a few dozen at the outside -- and a
+   * heap would be more machinery than that is worth. Iterating in insertion
+   * order and taking `<=` means the newest of equally ranked jobs wins, which is
+   * the old newest-first rule surviving where it was always right.
+   */
+  _take () {
+    let best = -1
+    let write = 0
+    for (let i = 0; i < this.queue.length; i++) {
+      const job = this.queue[i]
+      // A cancelled job is left in the queue rather than spliced out of it, so
+      // this is where it actually goes away.
+      if (job.cancelled) continue
+      this.queue[write++] = job
+      if (best < 0 || job.priority <= this.queue[best].priority) best = write - 1
+    }
+    this.queue.length = write
+    if (best < 0) return null
+    return this.queue.splice(best, 1)[0]
+  }
+
   _pump () {
     // One job per worker. Going wider would only push the surplus onto the main
     // thread, which is the thing the pool exists to avoid; without workers a
     // single inline job at a time keeps the grid scrolling.
     const cap = this.workersUsable ? this.limit : 1
-    while (this.active < cap && this.queue.length) {
-      // Newest first: in a grid being scrolled, the last thing asked for is the
-      // thing on screen.
-      const job = this.queue.pop()
-      // A cancelled job is left in the stack rather than spliced out of it, so
-      // this is where it actually goes away.
-      if (job.cancelled) continue
+    while (this.active < cap) {
+      const job = this._take()
+      if (!job) break
       job.started = true
       this.jobs.delete(job.entry.key)
       this.active++

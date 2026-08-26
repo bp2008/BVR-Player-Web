@@ -10,7 +10,8 @@ When opening a folder of files, *the browser may say* it is going to upload file
 https://bp2008.github.io/BVR-Player-Web/
 
 Open the player, then drag a `.bvr` file onto the page or press **Open**. Press
-**Browse** to page through a whole folder of recordings with thumbnails.
+**Browse** to page through a whole folder of recordings with thumbnails —
+including folders with six figures of files in them.
 
 Also includes a folder browser with thumbnails.
 
@@ -32,12 +33,15 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Volume / mute | speaker button + slider | <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>M</kbd> |
 | Fullscreen | ⛶ button, or double-click the video | <kbd>F</kbd> |
 | Open a file | Open button | <kbd>O</kbd> |
-| Browse a folder | Browse button | <kbd>L</kbd> |
+| Browse a folder | Browse button | <kbd>L</kbd>, or <kbd>Esc</kbd> |
 | Save a snapshot | camera button | <kbd>S</kbd> |
 | Metadata inspector | layers button | <kbd>I</kbd> |
 | Export to MP4 | download button | <kbd>E</kbd> |
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |
+
+<kbd>Esc</kbd> closes whichever panel is open; with none open it goes back to the
+folder you were browsing.
 
 <kbd>Space</kbd> always means play/pause, whatever has keyboard focus at the
 time — a button you clicked a moment ago does not get a second click out of it.

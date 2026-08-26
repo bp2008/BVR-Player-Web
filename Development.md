@@ -23,6 +23,27 @@ recordings — the main/sub stream selection and whether the two are shown in th
 same shape, all live in the settings panel and persist in the web browser's
 `localStorage`.
 
+The panel also reports how much of the browser's own storage this page is using
+and offers two ways to give it back: **Delete thumbnails**, which costs only the
+work of making them again as folders are re-browsed, and **Clear all site data
+and close**, which erases settings, cached listings, thumbnails and the folder
+permission grant and then shuts the page. Both ask first, in the panel rather
+than through a dialog.
+
+Closing is part of the second one rather than decoration: what is left on screen
+otherwise is an app whose settings and cached listings have been erased
+underneath it, and which writes a fresh set the moment anything is touched. An
+ordinary tab is not allowed to close itself — only a window script opened, or an
+installed PWA — so when the browser refuses, the panel says the tab still needs
+closing instead of pretending it happened.
+
+The figure itself comes from `navigator.storage.estimate()`, which every browser
+pads and rounds on purpose: an exact number would say more about what else the
+browser has been doing than about this page. It is presented as an approximation
+for that reason. The thumbnail *count* beside it is read from the store and is
+exact. Chrome's own accounting also lags a delete by a while, so the count drops
+at once where the size does not.
+
 ### Seeking and scrubbing
 
 Dragging the scrub bar shows the nearest key frame as you go, which is what lets
@@ -120,9 +141,218 @@ hundred kilobytes of each file is read: the header, the first key frame, and a
 short read from the end for the clip length. Thumbnails are cached in IndexedDB
 so a folder is only paid for once.
 
+A folder small enough to read quickly is read again every time rather than
+served from that cache — see below.
+
 This needs the page to be served over http(s) — the directory APIs have nothing
 to grant access to on a `file://` page — so the button only appears where it
 works. Opening one file at a time is unaffected.
+
+The filter box matches on the file name, which is also where the camera name
+lives, and the sort menu offers newest, oldest, name, camera and largest first.
+Time-ordered views are broken into day headings; the others are one flat run.
+
+#### Folders with six figures of recordings in them
+
+A Blue Iris folder that has been recording for a while is not a few hundred
+clips. The folder this was built against holds 220,000 files on a mechanical
+disk behind an SMB share — 111,000 recordings and a `.dat` sidecar beside each
+one — and everything about the browser is arranged around that being normal
+rather than exceptional.
+
+- **The listing reads names, not files.** At the file system level, enumerating
+  a quarter of a million names is one streamed operation that finishes in about
+  340 ms, even off a spinning disk over SMB, while reading each file's metadata
+  is an individual round trip at ~0.29 ms — half a minute of nothing happening.
+  So the listing carries only what the name says — camera and start time, which
+  is what the grid is grouped and sorted by anyway — and size and modified time
+  are read per clip as it scrolls into view. Opening that folder costs a few
+  dozen file reads instead of 111,000.
+
+- **Chrome's own per-entry cost is the ceiling, and on a network share it is
+  brutal.** Measured on the folder above, through `showDirectoryPicker()`:
+
+  | | ms per directory entry | 223,078 entries |
+  |---|---|---|
+  | default Chrome | 25.6 | **95 minutes** |
+  | `--disable-features=FileSystemAccessDirectoryIterationBlocklistCheck` | 0.255 | 57 seconds |
+
+  A hundredfold, from one feature flag. Chrome checks every entry it hands out
+  against a sensitive-path blocklist, and that check runs on the *resolved* path
+  — over SMB, a round trip each time, for a quarter of a million entries,
+  inside the browser process. That process also serves new tabs and DevTools,
+  which is why the whole browser stops responding rather than just this page. A
+  tab that will not open is the tell that the problem is over there.
+
+  The cost is not a property of the API in general. The same share, the same
+  Chrome, the same session, folders of empty files:
+
+  | files in folder | ms per entry |
+  |---|---|
+  | 500 | 0.477 |
+  | 2,000 | 0.493 |
+  | 8,000 | 0.481 |
+  | 30,000 | 0.454 |
+  | 60,000 | 0.423 |
+  | 120,000 | 0.462 |
+  | 223,078 | 0.697 |
+  | Aux1, quiet disk | 0.458 – 0.485 |
+  | Aux1, disk busy | 10 – 25 |
+
+  **Folder size is not the variable**, and neither is anything else about Aux1:
+  the same folder measures 0.458 ms an entry when nothing else is touching the
+  drive and twenty times that when a camera happens to be writing a clip to the
+  same spindle. The whole spread is contention for one mechanical disk.
+
+  `--disable-features=FileSystemAccessDirectoryIterationBlocklistCheck` is worth
+  about 2x on a quiet disk — 0.219 ms an entry against 0.458. An earlier reading
+  here claimed a *hundredfold*, from a single measurement that happened to land
+  on a quiet disk while its comparison landed on a busy one. Two runs, one
+  variable each, is the difference between the two numbers, and the wrong one
+  nearly went upstream.
+
+  What does hold across every folder and every disk state is the floor itself.
+  0.5 ms an entry means two minutes for a 223,000-entry folder, where .NET
+  enumerates the same directory in 340 ms and Explorer opens it in seconds —
+  something like 450 times slower for the same work. That is the number worth
+  explaining, and it is reproducible with a folder of empty files.
+
+  Worse, **starting one of these is not a decision that can be taken back.**
+  Breaking out of the `for await` calls `return()` on the iterator, which stops
+  this page reading — it does not stop Chrome. Measured by abandoning an
+  iteration after twenty entries and then timing `getFileHandle()` until it
+  returned to normal: 368 ms against a 239 ms full pass, 846 ms against 987 ms,
+  4.3 s against 3.8 s. Recovery takes about one complete enumeration at every
+  size, which is what continuing to the end looks like.
+
+  It shows up more plainly still in the first operation issued after walking
+  away. Abandon an iteration at 2,000 entries and the next `getFileHandle()` on
+  that directory blocks until the enumeration reaches the end — 25 s at 60,000
+  entries, 55 s at 120,000, 48.3 s on Aux1's 223,078 against a projected full
+  pass of 48.8 s. Subsequent calls take under a millisecond. Averaging that first
+  call in with the others hides it completely, which is how it went unnoticed for
+  so long.
+
+  This is what settles what the browser can do while a folder is being read: the
+  names arrive as they are found, but *nothing else about the folder can be read
+  at all* until the walk ends. Sizes, durations, thumbnails and playback all go
+  through `getFileHandle`, so all of them queue. The listing is therefore drawn
+  progressively — the grid fills, and scrolling and the filter box work on what
+  has arrived — while per-clip work is held back until the scan finishes rather
+  than being queued into a heap that lands all at once (`fill` returns early
+  while `scanning`). That is the real reason
+  the browser has to be killed from Task Manager: not the page, but a job in the
+  process that serves every tab.
+
+  So the folder is enumerated once and the names are kept (`saveListing`).
+  Reopening the browser reads them back instead of walking the directory again,
+  which is what turns a folder like Aux1 from unusable into a two-minute wait
+  paid once; Refresh is the way back to the disk. Only names are stored, because
+  only names are known at listing time anyway — a few megabytes for six figures
+  of recordings.
+
+  **Only where it is worth it.** The cache is not free: what it costs is a
+  listing that does not show a recording made since, until someone thinks to
+  press Refresh. That is a fair trade against two minutes and a bad one against
+  half a second, so a listing of 3,000 directory entries or fewer is thrown away
+  and the folder read again (`worthRelisting`). Chrome's floor is about half a
+  millisecond an entry whatever the folder, which puts that ceiling under two
+  seconds on a busy network share and out of sight on a local disk. It is also
+  the size the listing already treats as small enough to read whole up front
+  (`EAGER_STAT_LIMIT`), counted in entries rather than recordings — the cost is
+  per directory entry, and Blue Iris writes a `.dat` beside every clip, so a
+  folder's real price is about twice what the grid shows. Entries scanned is
+  therefore what `saveListing` records alongside the names.
+
+  A scan that falls under 400 entries a second for twelve seconds is still noted
+  against the folder, but as a warning rather than a refusal, and it expires
+  after a day. A slow reading almost always means the disk was busy at that
+  moment, not that the folder is beyond reach, so the panel says so and offers to
+  try again.
+
+  `<input webkitdirectory>` is not a way out. It is a genuinely different code
+  path, but it cannot be interrupted once a folder is chosen, and on this folder
+  it froze the browser outright both times it was tried.
+
+- **Handles are not kept.** A `FileSystemFileHandle` is not a plain object:
+  Chrome mints one per directory entry in the browser process, each with its own
+  Mojo endpoint, and it does this for `entries()` / `values()` / `keys()` alike —
+  Blink builds a handle from every entry it receives whichever one you asked for,
+  so `keys()` is not the cheap door it looks like. Keeping one per clip holds six
+  figures of pipes open for as long as the folder is listed.
+
+  So the listing keeps names and drops each handle as it arrives, and a clip's
+  handle is resolved from the directory by name when something needs it
+  (`fileHandleFor`). `File` objects go the same way — a `File` is a blob
+  registered in the browser process — with one exception: a `webkitdirectory`
+  listing has no way back to the bytes except the `File` it was handed, so
+  `releaseEntry` leaves those alone. Browsing a six-figure folder end to end
+  leaves zero handles and zero files retained.
+
+  This is hygiene rather than the cure. It stops the page adding to the browser
+  process's problems; it does not make the iteration above any cheaper.
+
+- **Yielding uses a `MessageChannel`, not `setTimeout`.** A background tab clamps
+  timers to one a second, so a scan left running while its tab is not in front
+  slows to a crawl — 223,078 entries took 35 seconds that way and 418 ms once the
+  yield stopped going through a timer. Nested timeouts are pinned to a 4 ms floor
+  even in the foreground. A channel message is neither throttled nor clamped.
+
+  Folders of up to 1,500 recordings are still read whole up front, because at
+  that size nobody notices and having every size in hand from the first paint is
+  nicer. **Largest first** is the one view that needs metadata for clips nobody
+  has looked at; choosing it runs a bulk pass with a progress bar and a Cancel,
+  once.
+
+- **Only the visible rows exist.** 111,000 tiles with a thumbnail each is not a
+  document a browser will lay out. The listing is flattened into rows — a day
+  heading, or one line of the grid — and since each kind has one height, the
+  offset of any row is a prefix sum and the row at a scroll position is a binary
+  search (`src/library/clipRows.js`). Thirty-odd tiles are in the document at any
+  time, positioned absolutely inside a spacer of the full height. Row heights are
+  guessed from the width and then corrected against what was actually laid out,
+  so the stylesheet stays the thing that decides how tall a tile is.
+
+- **Thumbnail work follows the window.** With only the visible rows in the
+  document there is nothing to ask an `IntersectionObserver` about — the window
+  *is* the answer, and it is already computed. Each scroll points the pool at
+  what is on screen and cancels what has left it, and because every pass reads
+  the current window, flinging past ten thousand clips abandons them rather than
+  queueing them: a fling of that size starts about sixty file reads, not ten
+  thousand.
+
+  **What is on screen goes first, and says so.** Which rows are *visible* is
+  tracked apart from which rows are *rendered*: the document keeps three rows
+  beyond each fold so a flick lands on something, but only the visible rows and
+  one row either side are ever asked for a picture. A thumbnail costs a file read
+  and a key-frame decode and two or three run at a time, so one spent three rows
+  off screen is one the row being looked at is waiting for.
+
+  Order alone was not enough. The pool served newest-first, on the reasoning that
+  in a grid being scrolled the last thing asked for is the thing on screen — true
+  only while every request comes from the same screenful. A clip a row below the
+  fold, queued a frame later than one in the middle of the window, took priority
+  over it, which is what made the fill order look arbitrary while the pictures
+  actually being looked at were still blank. Each request now carries a rank —
+  visible rows in reading order, then the overscan row on whichever side the list
+  is moving towards — and the pool serves the best rank in its queue rather than
+  the most recent. Ties still go to the newest, which is the old rule surviving
+  where it was always right. Scrolling re-ranks a job already waiting rather than
+  queueing it again.
+
+- **The listing is not reactive.** Handing a six-figure array to Vue means a
+  proxy per entry and a dependency per field read, paid on every scroll for rows
+  that are not in the document. The component keeps the listing as plain data and
+  publishes only the rendered window; results arriving are folded in through a
+  counter bumped once per frame.
+
+- **Filtering does not re-sort.** The listing is sorted once, in place, so the
+  filter is a subset of an array that is already in order. A keystroke is one
+  scan of pre-lowered names plus a row rebuild — about 10 ms across 111,000
+  clips, behind 120 ms of typing debounce. Sorting by name uses a cached
+  `Intl.Collator`; `localeCompare` with options resolves them on every call,
+  which at two million comparisons is two seconds of frozen page against
+  seventy-odd milliseconds.
 
 ### Metadata
 
@@ -218,7 +448,8 @@ src/bvr/         format layer   - frame headers, file header, full-file index,
                                   codec probe, overlay metadata, tail scan
 src/player/      playback       - decode pipelines, media clock, canvas renderer,
                                   zoom/pan gestures, overlay painting
-src/library/     folder browser - directory access, thumbnail worker, IndexedDB cache
+src/library/     folder browser - directory access, virtual list rows, thumbnail
+                                  worker, IndexedDB cache
 src/export/      MP4 export     - Annex-B to AVCC, ISO BMFF muxer, remux/transcode
 src/panels/      docking        - the panel list, the layout solver, pop-out windows
 src/util/        shared rules   - aspect correction, settings, formatting, keys
@@ -395,6 +626,72 @@ src/components/  Vue 3 UI (Options API)
 
 Where the obvious implementation was tried and replaced, or deliberately not
 taken.
+
+### Chunks fed and pictures kept are two different numbers
+
+The video pipeline keeps a sliding window of decoded frames around the position
+being played, sized from a memory budget — an `ImageBitmap` is RGBA-backed, so a
+3632×1632 picture is 23 MB and a 4K clip would otherwise eat GPU memory by the
+gigabyte. The same number used to bound how far ahead of the anchor *chunks were
+fed into the decoder*, which was one number doing two jobs, and on one recording
+the two jobs wanted opposite things.
+
+A decoder does not hand a picture back the moment it is fed one. It fills its
+decoded picture buffer first so that it can emit in display order, and how many
+it swallows before the first one comes out is set by the stream's level and
+picture size. Measured through WebCodecs on a level-5.1 recording:
+
+| stream | picture | chunks in before the first picture out |
+|---|---|---|
+| main, hardware | 3632×1632 | **8** |
+| main, `prefer-software` | 3632×1632 | 2 |
+| sub, hardware | 1200×536 | **17** |
+
+Chrome's hardware H.264 path does this whatever `optimizeForLatency` says — the
+flag made no difference to either measurement. The memory budget, meanwhile,
+gives a 5.9 megapixel picture a window of six, and six frames behind the anchor
+have to come out of that too. Seven chunks in, nothing out, and nothing more fed
+because the window was already "full" of them: each side waiting for the other,
+nothing actually failed so no error raised, and the buffering chip up for as long
+as the page was left open. That is what a recording that would not play looked
+like, and it looked like nothing at all.
+
+The two are now separate. `maxAhead` is pictures kept and stays a memory
+question; `_feedAhead()` is chunks fed and carries an extra allowance for the
+decoder's reorder depth. The extra chunks sit inside the decoder rather than in
+the frame buffer, so the allowance is paid in input rather than in memory — and
+the two demands trade against each other anyway, since the picture buffer a
+decoder is entitled to shrinks as the pictures grow. **The deepest reordering
+belongs to the smallest frames**, which are the cheapest to keep.
+
+The depth itself is measured rather than predicted. Deriving it from the
+bitstream means the level table, VUI parsing, and trusting the decoder to agree
+with all of it; instead the pipeline notices that it is starved — the decoder has
+taken every chunk, nothing is on its way back, and the look-ahead has not filled
+— and feeds it more, until pictures appear. Nothing at all happens on a file that
+never stalls.
+
+Two details matter more than they look:
+
+- **The test is whether the look-ahead filled, not whether the frame being waited
+  on arrived.** A decoder handing back frame *N* only once frame *N+17* has gone
+  in keeps playback technically alive with no look-ahead whatsoever: every
+  picture lands exactly when it is needed, the buffering chip never goes out, and
+  one slow read is a visible stutter. The first version of this check stopped at
+  "the anchor's own frame is here" and left the sub stream limping in exactly
+  that state.
+
+- **The stall has to last.** A decoder dequeues a chunk before it delivers the
+  picture that chunk produced, so "queue empty, nothing back yet" is also the
+  ordinary moment just before an output — and `ondequeue` fires often enough to
+  catch several of them. A real deadlock lasts as long as the page is open, so
+  the reading has to hold still for 150 ms, with any picture arriving counting as
+  movement. Without that the allowance grew on healthy files too.
+
+What a stream's decoder turned out to want is remembered per stream for as long
+as the file is open, so switching between main and sub does not pay for the
+discovery twice. It looked like the decoder was being left dirty by a switch; it
+was the measurement being thrown away with the old pipeline.
 
 ### Very large files — not done, on purpose
 

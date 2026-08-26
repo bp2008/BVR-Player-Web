@@ -329,6 +329,10 @@ export default {
       pointerOverChrome: false,
       installPrompt: null,
       libraryOpen: false,
+      // Whether there is a folder to go back to. Escape returns to the browser
+      // wherever there is one, which means remembering that a folder was opened
+      // even by the `webkitdirectory` route, where there is no handle to keep.
+      folderKnown: false,
       mounted: false,
 
       // ------------------------------------------------------------- panels
@@ -569,6 +573,7 @@ export default {
     async onLibraryOpen (clip) {
       try {
         const file = await openEntry(clip)
+        this.folderKnown = true
         this.libraryOpen = false
         await this.openFile(file)
       } catch (e) {
@@ -999,6 +1004,7 @@ export default {
      * call it are two separate facts.
      */
     setSnapshotFolder (handle) {
+      if (handle) this.folderKnown = true
       this.snapshotDir = handle || null
       this.snapshotFolderReady = !!handle
       this.snapshotFolderName = (handle && handle.name) || (handle ? 'the open folder' : '')
@@ -1256,6 +1262,11 @@ export default {
           // The panel most recently worked in is the one Escape means.
           if (this.activePanel && this.panelOpen[this.activePanel]) this.closePanel(this.activePanel)
           else if (this.openIds.length) this.closePanel(this.openIds[this.openIds.length - 1])
+          // Nothing left to close, and a folder to go back to: Escape is the
+          // way out of a recording as much as out of a panel, and the place it
+          // came from is the folder it was picked from. The browser's own
+          // Escape closes it again, so the key goes both ways.
+          else if (this.canBrowse && this.folderKnown) this.openLibrary()
           else handled = false
           break
         default:

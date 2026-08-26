@@ -12,7 +12,7 @@
  * `file://` and storage-pressure eviction are all normal conditions here.
  */
 
-const DB_NAME = 'bvr-player'
+export const DB_NAME = 'bvr-player'
 const DB_VERSION = 1
 const THUMBS = 'thumbnails'
 const HANDLES = 'handles'
@@ -131,6 +131,26 @@ export async function clearThumbs () {
   await run(THUMBS, 'readwrite', (store) => store.clear())
 }
 
+/** How many thumbnails are cached, for the settings panel to report. */
+export async function countThumbs () {
+  const n = await run(THUMBS, 'readonly', (store) => store.count())
+  return n || 0
+}
+
+/**
+ * Lets go of the database, so that deleting it can actually happen.
+ *
+ * `deleteDatabase` with a connection still open does not fail, it *blocks*: the
+ * request waits for every connection to close and the caller waits on a promise
+ * that never settles. The module reopens on the next call, which is what makes
+ * this safe to do while the page keeps running.
+ */
+export function closeThumbDb () {
+  const pending = dbPromise
+  dbPromise = null
+  if (pending) pending.then((db) => { if (db) db.close() }).catch(() => {})
+}
+
 /**
  * Directory handles survive a reload, which is what lets the app reopen the
  * folder someone was last looking at. The permission grant may not survive, so
@@ -174,12 +194,19 @@ const SLOW_KEY = (name) => `slow:${name || ''}`
  *
  * Stale listings are a matter of new recordings not appearing, which Refresh
  * fixes, so this trades freshness for an opening that does not cost two minutes.
+ * A folder that was cheap to enumerate is simply read again instead -- see
+ * `FolderBrowser.worthRelisting`, which is what `scanned` is stored for.
  */
 const LISTING_KEY = (name) => `listing:${name || ''}`
 
-export async function saveListing (name, names) {
+/**
+ * `scanned` is directory entries walked, not recordings kept: the cost of
+ * listing is paid per entry, and Blue Iris writes a `.dat` beside every clip, so
+ * the number of names is about half the real price of coming back for more.
+ */
+export async function saveListing (name, names, scanned = 0) {
   await run(HANDLES, 'readwrite', (store) =>
-    store.put({ names, savedAt: Date.now() }, LISTING_KEY(name)))
+    store.put({ names, scanned, savedAt: Date.now() }, LISTING_KEY(name)))
 }
 
 export async function loadListing (name) {

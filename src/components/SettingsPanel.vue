@@ -234,6 +234,50 @@
       </div>
     </template>
 
+    <h3 class="spanel__h">Storage</h3>
+
+    <p class="spanel__note">
+      Thumbnails, folder listings and these settings are kept in this browser&rsquo;s own
+      storage. Nothing is ever sent anywhere.
+    </p>
+
+    <div class="spanel__row spanel__row--stack">
+      <span class="spanel__label">
+        {{ storageSummary }}
+        <em class="spanel__sub">{{ storageDetail }}</em>
+      </span>
+    </div>
+
+    <div class="spanel__storage">
+      <template v-if="confirming === 'thumbs'">
+        <span class="spanel__warn">Delete {{ thumbCountLabel }}?</span>
+        <button type="button" class="btn btn--tiny btn--danger" @click="deleteThumbs" @keydown.stop>Delete</button>
+        <button type="button" class="btn btn--tiny" @click="confirming = ''" @keydown.stop>Keep</button>
+      </template>
+      <template v-else>
+        <button type="button" class="btn btn--tiny" :disabled="busy" @click="confirming = 'thumbs'" @keydown.stop>
+          Delete thumbnails
+        </button>
+        <span class="spanel__sub">Made again as folders are browsed</span>
+      </template>
+    </div>
+
+    <div class="spanel__storage">
+      <template v-if="confirming === 'all'">
+        <span class="spanel__warn">Erase everything and close this page?</span>
+        <button type="button" class="btn btn--tiny btn--danger" @click="clearEverything" @keydown.stop>Erase</button>
+        <button type="button" class="btn btn--tiny" @click="confirming = ''" @keydown.stop>Cancel</button>
+      </template>
+      <template v-else>
+        <button type="button" class="btn btn--tiny" :disabled="busy" @click="confirming = 'all'" @keydown.stop>
+          Clear all site data and close
+        </button>
+        <span class="spanel__sub">Settings, listings, thumbnails and folder permissions</span>
+      </template>
+    </div>
+
+    <p v-if="storageNote" class="spanel__note spanel__note--warn">{{ storageNote }}</p>
+
     <h3 class="spanel__h">Keyboard</h3>
     <div class="spanel__keys">
       <span><kbd>Space</kbd> play/pause</span>
@@ -257,6 +301,9 @@ import { streamOptions } from '../util/streams.js'
 import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
 import { SNAPSHOT_FORMATS, canEncodeWebp } from '../player/snapshot.js'
 import { canPickDirectory } from '../library/directory.js'
+import { clearThumbs, countThumbs } from '../library/thumbCache.js'
+import { clearSiteData, closePage, storageUsage } from '../util/storage.js'
+import { formatBytes } from '../util/format.js'
 
 /**
  * The settings panel.
@@ -277,7 +324,20 @@ export default {
   },
   emits: ['patch', 'stream', 'overlay', 'rate'],
   data () {
-    return { rates: PLAYBACK_RATES }
+    return {
+      rates: PLAYBACK_RATES,
+      // Both destructive buttons ask first, and ask in place: this is a panel
+      // rather than a dialog because the app does not put things over the
+      // video, and a confirmation is no reason to start.
+      confirming: '',
+      busy: false,
+      storageNote: '',
+      storage: null,
+      thumbCount: 0
+    }
+  },
+  mounted () {
+    this.readStorage()
   },
   computed: {
     /** Says what the setting costs, in the terms that decide it. */
@@ -354,6 +414,29 @@ export default {
       if (!this.hasSnapshotFolder) return 'Browse a folder first, then this can be turned on'
       if (!this.settings.snapshotToFolder) return 'Otherwise stills download as files'
       return `Writing into ${this.snapshotFolder}`
+    },
+
+    // ---------------------------------------------------------------- storage
+    storageSummary () {
+      if (!this.storage) return 'Reading storage\u2026'
+      if (!this.storage.supported) return 'This browser will not say how much it is using'
+      return `Using about ${formatBytes(this.storage.usage)}`
+    },
+    /**
+     * The figure a browser reports is padded and rounded on purpose -- an exact
+     * one would say more about the browser than about this page -- so it is
+     * offered as an approximation rather than dressed up as a measurement.
+     */
+    storageDetail () {
+      const bits = [`${this.thumbCountLabel} cached`]
+      if (!this.storage || !this.storage.supported) return bits.join(' \u00b7 ')
+      if (this.storage.quota) bits.push(`${formatBytes(this.storage.quota)} available`)
+      bits.push('browsers round this figure')
+      return bits.join(' \u00b7 ')
+    },
+    thumbCountLabel () {
+      const n = this.thumbCount
+      return `${n.toLocaleString()} thumbnail${n === 1 ? '' : 's'}`
     }
   },
   methods: {
@@ -406,6 +489,48 @@ export default {
     },
     emitPatch (patch) {
       this.$emit('patch', patch)
+    },
+
+    // ---------------------------------------------------------------- storage
+    async readStorage () {
+      const [storage, thumbCount] = await Promise.all([storageUsage(), countThumbs()])
+      this.storage = storage
+      this.thumbCount = thumbCount
+    },
+    async deleteThumbs () {
+      this.confirming = ''
+      this.busy = true
+      this.storageNote = ''
+      try {
+        await clearThumbs()
+        await this.readStorage()
+      } finally {
+        this.busy = false
+      }
+    },
+    /**
+     * Everything gone, and then the page.
+     *
+     * Closing is not decoration: what is left on screen otherwise is an app
+     * whose settings, cached listings and folder permissions have all been
+     * erased underneath it, and which writes a fresh set the moment anything is
+     * touched. An ordinary tab is not allowed to close itself, so where that is
+     * refused the page says what is left to do rather than pretending.
+     */
+    async clearEverything () {
+      this.confirming = ''
+      this.busy = true
+      this.storageNote = ''
+      try {
+        await clearSiteData()
+        await this.readStorage()
+        const closed = await closePage()
+        if (!closed) {
+          this.storageNote = 'Site data cleared. This browser will not let a page close itself, so close the tab.'
+        }
+      } finally {
+        this.busy = false
+      }
     }
   }
 }
@@ -500,6 +625,50 @@ export default {
 
 .spanel__subtoggles input {
   accent-color: var(--accent);
+}
+
+.spanel__row--stack {
+  border-bottom: none;
+  padding-bottom: 2px;
+}
+
+.spanel__note {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+.spanel__note--warn {
+  opacity: 1;
+  color: #f0b429;
+}
+
+.spanel__storage {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 4px 0 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.spanel__storage .spanel__sub {
+  color: var(--text-dim);
+}
+
+.spanel__warn {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.spanel__storage .btn--danger {
+  border-color: rgba(255, 120, 110, 0.55);
+  background: rgba(255, 80, 70, 0.18);
+}
+
+.spanel__storage .btn--danger:hover {
+  background: rgba(255, 80, 70, 0.32);
 }
 
 .spanel__keys {

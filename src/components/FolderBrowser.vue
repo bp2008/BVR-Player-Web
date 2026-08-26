@@ -239,6 +239,29 @@ import {
 // scroll is not building rows nobody will see.
 const OVERSCAN = 3
 
+// Rows beyond the viewport that are worth a *thumbnail*, which is a much smaller
+// number than the rows worth rendering. A rendered row costs a few elements; a
+// thumbnail costs a file read and a key-frame decode, and every one of those
+// spent on a row nobody can see is one the row being looked at is waiting for.
+// One row either side is enough that a scroll of a single line lands on pictures
+// that are already there.
+const THUMB_OVERSCAN = 1
+
+/**
+ * Past this many directory entries, a cached listing is used instead of reading
+ * the folder again.
+ *
+ * The cache exists for the folder that takes two minutes to enumerate, not the
+ * one that takes half a second, and its price is a listing that does not show a
+ * recording made since. Chrome's floor is about half a millisecond per entry
+ * whatever the folder, so three thousand of them is under two seconds on a busy
+ * network share and imperceptible on a local disk -- at that size the trade is
+ * simply not worth making, and the disk is asked every time. It is also the same
+ * size the listing already calls small enough to read whole up front
+ * (`EAGER_STAT_LIMIT`), counted in entries rather than recordings.
+ */
+const RELIST_LIMIT = 3000
+
 // Concurrent `getFile()` calls for clips that have just scrolled into view.
 // These are latency, not throughput -- over SMB a single one costs about as much
 // as a dozen overlapped.
@@ -379,6 +402,11 @@ export default {
     this.rows = []         // headings and grid lines, flat
     this.offsets = null    // where each row sits, cumulative
     this.range = { first: -1, last: -1 }
+    // The rows the viewport actually covers, as opposed to the rows rendered
+    // around it. Thumbnail priority is decided from this and nothing else.
+    this.visible = { first: -1, last: -1 }
+    this.lastTop = 0
+    this.scrollingDown = true
     this.metrics = { head: 46, item: 220 }
     this.metricSig = ''
     this.wanted = new Map() // name -> clip, for everything currently on screen
@@ -514,16 +542,22 @@ export default {
       if (!force) {
         const cached = await loadListing(this.dirName)
         if (cached && cached.names.length) {
-          // Enumerating is the expensive part and it has already been paid for.
-          this.slowFolder = null
-          this.listedAt = cached.savedAt || 0
-          this.setEntries(entriesFromNames(cached.names, this.dirHandle))
-          return
+          if (!this.worthRelisting(cached)) {
+            // Enumerating is the expensive part and it has already been paid for.
+            this.slowFolder = null
+            this.listedAt = cached.savedAt || 0
+            this.setEntries(entriesFromNames(cached.names, this.dirHandle))
+            return
+          }
+          // Small enough to simply read again -- and the slow-folder question
+          // does not arise, because the listing being replaced is itself the
+          // record of what this folder costs to enumerate.
+        } else {
+          // Asked before anything is started, because once an enumeration is
+          // under way there is no calling it back.
+          this.slowFolder = await getSlowFolder(this.dirName)
+          if (this.slowFolder) return
         }
-        // Asked before anything is started, because once an enumeration is
-        // under way there is no calling it back.
-        this.slowFolder = await getSlowFolder(this.dirName)
-        if (this.slowFolder) return
       }
       this.slowFolder = null
       this.listedAt = 0
@@ -534,10 +568,14 @@ export default {
       this.lastProgressRender = 0
       this.error = ''
       this.task = { label: 'Reading folder…', done: 0, total: 0 }
+      // Entries walked, not recordings kept: it is what listing this folder
+      // again would cost, and so what decides whether it is worth caching.
+      let scanned = 0
       try {
         const entries = await listDirectory(this.dirHandle, {
           signal,
           onProgress: (p) => {
+            scanned = p.scanned
             this.task = {
               label: 'Reading folder…',
               done: p.kept,
@@ -552,7 +590,7 @@ export default {
         this.setEntries(entries)
         if (entries.length) {
           this.listedAt = Date.now()
-          saveListing(this.dirName, entries.map((e) => e.name))
+          saveListing(this.dirName, entries.map((e) => e.name), scanned)
         } else {
           this.error = 'That folder holds no .bvr recordings.'
           clearListing(this.dirName)
@@ -569,6 +607,24 @@ export default {
         // moment it becomes possible.
         this.pump()
       }
+    },
+    /**
+     * Whether a cached listing is small enough that reading the folder again
+     * beats trusting it.
+     *
+     * A folder of a few hundred recordings comes back in well under a second,
+     * and the whole cost of the cache is falling behind: a clip recorded since
+     * is simply missing until someone thinks to press Refresh. There is no
+     * reason to make a small folder pay that -- the optimisation exists for the
+     * six-figure folder that takes two minutes, and nothing else.
+     *
+     * Judged on entries scanned rather than recordings kept, because that is
+     * where the cost actually lands and Blue Iris writes a `.dat` beside every
+     * clip. A listing saved before that number was recorded falls back to the
+     * count of names, which under-counts and so errs towards keeping the cache.
+     */
+    worthRelisting (cached) {
+      return (cached.scanned || cached.names.length) <= RELIST_LIMIT
     },
     /**
      * Puts what has arrived so far on screen, while the rest is still coming.
@@ -712,6 +768,7 @@ export default {
       this.offsets = measureRows(this.rows, this.metrics.head, this.metrics.item)
       this.totalHeight = this.offsets[this.rows.length]
       this.range.first = -1
+      this.visible.first = this.visible.last = -1
       this.updateWindow()
     },
     /**
@@ -765,19 +822,36 @@ export default {
         return
       }
       const top = Math.max(0, el.scrollTop)
-      const first = Math.max(0, rowAt(this.offsets, top) - OVERSCAN)
-      const last = Math.min(this.rows.length - 1, rowAt(this.offsets, top + el.clientHeight) + OVERSCAN)
-      if (first === this.range.first && last === this.range.last) return
+      // The rows the viewport covers, before the rendering overscan is added.
+      // Which rows are *visible* is the whole of what thumbnail priority is
+      // decided from, so it is kept apart from which rows are in the document.
+      const vFirst = rowAt(this.offsets, top)
+      const vLast = rowAt(this.offsets, top + el.clientHeight)
+      const first = Math.max(0, vFirst - OVERSCAN)
+      const last = Math.min(this.rows.length - 1, vLast + OVERSCAN)
+      const sameRows = first === this.range.first && last === this.range.last
+      const sameVisible = vFirst === this.visible.first && vLast === this.visible.last
+      // A scroll that moved the viewport without changing which rows are in the
+      // document still changed what is on screen, and so what to fetch first.
+      if (sameRows && sameVisible) return
+      // Which way the list is going decides which side of it is worth reading
+      // ahead into.
+      if (top !== this.lastTop) this.scrollingDown = top > this.lastTop
+      this.lastTop = top
+      this.visible.first = vFirst
+      this.visible.last = vLast
       this.range.first = first
       this.range.last = last
 
-      const out = []
-      for (let i = first; i <= last; i++) {
-        const row = this.rows[i]
-        if (row.head) out.push({ i, head: row.head, count: row.count, top: this.offsets[i] })
-        else out.push({ i, head: '', top: this.offsets[i], clips: this.clips.slice(row.start, row.end) })
+      if (!sameRows) {
+        const out = []
+        for (let i = first; i <= last; i++) {
+          const row = this.rows[i]
+          if (row.head) out.push({ i, head: row.head, count: row.count, top: this.offsets[i] })
+          else out.push({ i, head: '', top: this.offsets[i], clips: this.clips.slice(row.start, row.end) })
+        }
+        this.window = out
       }
-      this.window = out
       this.pump()
     },
 
@@ -792,10 +866,9 @@ export default {
      */
     pump () {
       const next = new Map()
-      for (const row of this.window) {
-        if (!row.clips) continue
-        for (const clip of row.clips) next.set(clip.name, clip)
-      }
+      // Insertion order is priority order from here on: `fill` walks the map and
+      // hands each clip its rank, and the service serves the best rank first.
+      for (const clip of this.thumbOrder()) next.set(clip.name, clip)
       for (const [name, clip] of this.wanted) {
         if (next.has(name)) continue
         if (clip.key) this.service.cancel(clip.key)
@@ -808,7 +881,42 @@ export default {
       this.fill()
     },
     /**
-     * Starts work for visible clips, up to the concurrency bound.
+     * The clips worth a thumbnail, most urgent first.
+     *
+     * What is on screen comes first, in reading order, and then a row either
+     * side of it so a scroll of one line lands on pictures that are already
+     * there. Rows further out are still *rendered* -- the document keeps a few
+     * beyond the fold so a flick has something to land on -- but they are not
+     * asked for at all: a file read and a key-frame decode spent three rows off
+     * screen is one the row being looked at is waiting for.
+     *
+     * Order alone is not enough, because a thumbnail can take a second or more
+     * and only two or three run at a time. So the rank each clip gets here is
+     * handed to the service, which serves the best rank in its queue rather than
+     * the most recent request. Without that, a clip queued a frame later from
+     * below the fold outranks one in the middle of the screen -- which is
+     * exactly the arbitrary-looking order this replaces.
+     */
+    thumbOrder () {
+      const rows = []
+      for (const row of this.window) {
+        if (!row.clips) continue
+        const distance = Math.max(0, this.visible.first - row.i, row.i - this.visible.last)
+        if (distance > THUMB_OVERSCAN) continue
+        rows.push({ row, distance, above: row.i < this.visible.first })
+      }
+      rows.sort((a, b) =>
+        a.distance - b.distance ||
+        // Off screen, the way the list is moving decides which side goes first.
+        (this.scrollingDown ? Number(a.above) - Number(b.above) : Number(b.above) - Number(a.above)) ||
+        a.row.i - b.row.i)
+      const out = []
+      for (const r of rows) for (const clip of r.row.clips) out.push(clip)
+      return out
+    },
+    /**
+     * Starts work for the wanted clips, in rank order, up to the concurrency
+     * bounds.
      *
      * Each pass reads the *current* window, so scrolling past a screenful
      * abandons it rather than queueing it: whatever has not been started yet is
@@ -818,10 +926,16 @@ export default {
       // Every one of these would queue behind the directory walk and land in a
       // heap when it finished. Nothing is gained by asking early.
       if (this.scanning) return
+      let rank = 0
       for (const clip of this.wanted.values()) {
-        if (isHydrated(clip)) { this.want(clip); continue }
+        const priority = rank++
+        if (isHydrated(clip)) { this.want(clip, priority); continue }
         if (clip.statPromise) continue
-        if (this.statActive >= STAT_WIDTH) return
+        // Out of stat slots. Carrying on rather than stopping matters: the
+        // clips further down this list may already be hydrated, and a picture
+        // they could have had should not wait on a round trip for a clip that
+        // happened to come first.
+        if (this.statActive >= STAT_WIDTH) continue
         this.statActive++
         hydrate(clip)
           .then(() => {
@@ -831,15 +945,15 @@ export default {
             // A stat that lands after its clip has scrolled away arrives too
             // late for `pump` to have released it -- there was nothing to
             // release when it looked. It has to be done here or not at all.
-            if (this.wanted.has(clip.name)) this.want(clip)
+            if (this.wanted.has(clip.name)) this.want(clip, priority)
             else releaseEntry(clip)
           })
           .finally(() => { this.statActive--; this.fill() })
       }
     },
-    want (clip) {
+    want (clip, priority) {
       if (!clip.key || this.service.get(clip.key)) return
-      this.service.request(clip).then((result) => {
+      this.service.request(clip, priority).then((result) => {
         if (result) this.bump()
         if (!this.wanted.has(clip.name)) releaseEntry(clip)
       })

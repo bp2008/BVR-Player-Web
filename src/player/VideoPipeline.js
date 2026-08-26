@@ -18,6 +18,30 @@ const TS_SCALE = 1e9
  */
 const SCRUB_AHEAD = 4
 
+/**
+ * The most pictures a decoder is allowed to hold before it has to hand one back.
+ *
+ * H.264 and H.265 both cap the decoded picture buffer at 16 frames, so 16 chunks
+ * in with nothing out is the point past which the decoder is broken rather than
+ * merely patient. See `_widenForReorder`, which is what this bounds.
+ */
+const MAX_REORDER = 16
+
+// How much more input one detected stall buys.
+const REORDER_STEP = 4
+
+/**
+ * How long the pipeline must look stuck before it is believed.
+ *
+ * A decoder dequeues a chunk before it delivers the picture that chunk produced,
+ * so "queue empty, nothing back yet" is also what the ordinary moment just
+ * before an output looks like -- and `ondequeue` fires often enough to catch
+ * several of those. A real deadlock lasts for as long as the page is open, so
+ * insisting it last a tenth of a second costs nothing and keeps the allowance
+ * from growing on files that were only ever a frame away from producing one.
+ */
+const STALL_GRACE_MS = 150
+
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
 /**
@@ -28,9 +52,13 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
  * instant instead of requiring a fresh key-frame seek every time.
  */
 export class VideoPipeline {
-  constructor ({ reader, onError }) {
+  constructor ({ reader, onError, reorderHint = 0 }) {
     this.reader = reader
     this.onError = onError || (() => {})
+    // What this stream's decoder wanted last time it was played, if anything
+    // has played it before. Only ever a starting point -- it is re-learned from
+    // scratch if it turns out to be too little.
+    this.reorderHint = clamp(Math.round(reorderHint) || 0, 0, MAX_REORDER)
 
     this.pstream = null
     this.codecInfo = null
@@ -55,9 +83,23 @@ export class VideoPipeline {
     this._pendingCopies = 0
     this._copyFrames = typeof createImageBitmap === 'function'
     this._flushEpoch = -1
+    // Chunks this stream's decoder has been shown to swallow before it hands
+    // anything back. Input only -- see `_feedAhead`.
+    this._reorder = this.reorderHint
+    this._outIdx = -1
+    this._stallMark = ''
+    this._stallSince = 0
   }
 
-  /** Frame-window sizing scaled to resolution, so 4K clips do not eat GPU memory. */
+  /**
+   * Frame-window sizing scaled to resolution, so 4K clips do not eat GPU memory.
+   *
+   * A budget rather than a limit: `_keepTo` holds a few frames past this, and a
+   * stream whose decoder demands a deep reorder allowance holds more again. A
+   * recording that will not play is worse than one that is expensive to play,
+   * and the two rarely collide -- the deepest reordering belongs to the smallest
+   * pictures, where a frame costs almost nothing to keep.
+   */
   _sizeWindow () {
     const w = this.pstream.width || 1920
     const h = this.pstream.height || 1080
@@ -67,6 +109,82 @@ export class VideoPipeline {
     this.maxBehind = clamp(Math.floor(total / 3), 2, 8)
     this._playAhead = total - this.maxBehind
     this._applyWindow()
+  }
+
+  /**
+   * How far past the anchor chunks may be *fed*, as opposed to how many decoded
+   * pictures are kept.
+   *
+   * These are two different quantities, and conflating them is what deadlocked
+   * this pipeline. A decoder does not hand a picture back the moment it is fed
+   * one: it fills its decoded picture buffer first so that it can emit in
+   * display order, and Chrome's hardware H.264 path does that whatever
+   * `optimizeForLatency` says. How many it swallows first is set by the stream's
+   * level and picture size -- measured on one recording, its 3632x1632 level-5.1
+   * main stream wants eight chunks in before the first picture comes out and its
+   * 1200x536 sub stream wants seventeen. The software decoder wants two.
+   *
+   * The frame window, meanwhile, is sized from a memory budget, and a 5.9
+   * megapixel picture earns a look-ahead of six. Six chunks in, nothing out, and
+   * nothing more fed because the window is "full" of them: each side waits for
+   * the other, nothing has failed so no error is raised, and the buffering chip
+   * stays up for as long as the page is left open.
+   *
+   * The extra chunks sit inside the decoder rather than in `buf`, so this
+   * allowance is paid in input and not in memory -- and the two demands trade
+   * against each other anyway, because the picture buffer a decoder is entitled
+   * to shrinks as the pictures grow. The deepest reordering belongs to the
+   * smallest frames.
+   */
+  _feedAhead () {
+    return this.maxAhead + this._reorder
+  }
+
+  /** The highest index worth keeping a picture for; see `_feedAhead`. */
+  _keepTo () {
+    // Outputs lag the feed by the reorder depth, so an allowance running ahead
+    // of the slack here would decode pictures only to throw them away and then
+    // want them again a frame later.
+    return this.anchorIdx + this.maxAhead + Math.max(4, this._reorder)
+  }
+
+  /**
+   * Grows the input allowance when the decoder is holding on to everything it
+   * has been given.
+   *
+   * Predicting the depth from the bitstream means the level table, VUI parsing,
+   * and trusting the decoder to agree with all of it. Detecting the stall and
+   * feeding more until pictures appear needs none of that, and costs nothing at
+   * all on a file that never stalls.
+   */
+  _widenForReorder () {
+    if (this.kind !== 'video' || this.closed || !this.configured) return
+    if (!this.decoder || this.decoder.state !== 'configured') return
+    if (this._reorder >= MAX_REORDER) return
+    // There is more of the stream to feed, and the allowance is what stopped us.
+    if (!this.pstream || this.feedIdx >= this.pstream.count) return
+    if (this.feedIdx <= this.anchorIdx + this._feedAhead()) return
+    // The decoder has taken every chunk and no picture is on its way back, so
+    // nothing is going to change without more input.
+    if (this.decoder.decodeQueueSize > 0 || this._pendingCopies > 0) return
+    // The test is whether the look-ahead has *filled*, not whether the frame
+    // being waited on has turned up. A decoder that hands back frame N only once
+    // frame N+17 has gone in keeps playback alive with no look-ahead at all --
+    // every picture arrives exactly when it is needed, the buffering chip never
+    // goes out, and one slow read is a visible stutter. That is a starved
+    // pipeline too, and the cure is the same.
+    if (this._outIdx >= this.anchorIdx + this.maxAhead) return
+    // Nothing has moved for long enough that nothing is going to; see
+    // STALL_GRACE_MS. Pictures still arriving count as movement, so a decoder
+    // that is merely slow resets the clock rather than being fed more. The
+    // player pumps this once an animation frame while it waits, so the second
+    // reading is never far behind.
+    const mark = `${this.epoch}:${this.feedIdx}:${this.anchorIdx}:${this._outIdx}`
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    if (this._stallMark !== mark) { this._stallMark = mark; this._stallSince = now; return }
+    if (now - this._stallSince < STALL_GRACE_MS) return
+    this._reorder = Math.min(MAX_REORDER, this._reorder + REORDER_STEP)
+    this.pump()
   }
 
   /**
@@ -86,6 +204,8 @@ export class VideoPipeline {
   }
 
   _applyWindow () {
+    // Pictures kept, which is a memory question. What the decoder must be fed
+    // in order to produce them is a separate one -- see `_feedAhead`.
     this.maxAhead = this.scrubbing ? SCRUB_AHEAD : this._playAhead
   }
 
@@ -95,6 +215,11 @@ export class VideoPipeline {
     this.pstream = pstream
     this.codecInfo = codecInfo
     this.kind = codecInfo.kind
+    // Whatever the last stream's decoder needed says nothing about this one's,
+    // so this starts from the hint for *this* stream and re-learns from there.
+    this._reorder = this.reorderHint
+    this._outIdx = -1
+    this._stallMark = ''
     this._sizeWindow()
     this.epoch++
     this.feedIdx = 0
@@ -151,6 +276,9 @@ export class VideoPipeline {
 
   get bufferedCount () { return this.buf.size }
 
+  /** What this stream's decoder turned out to want, for the next pipeline. */
+  get reorder () { return this._reorder }
+
   setAnchor (idx) {
     this.anchorIdx = idx
     this._trim()
@@ -194,6 +322,7 @@ export class VideoPipeline {
     }
     this.feedIdx = k
     this.runStart = k
+    this._outIdx = -1
   }
 
   pump () {
@@ -214,7 +343,7 @@ export class VideoPipeline {
     }
     while (!this.closed) {
       if (this.feedIdx >= s.count) break
-      if (this.feedIdx > this.anchorIdx + this.maxAhead) break
+      if (this.feedIdx > this.anchorIdx + this._feedAhead()) break
       if (this.kind === 'video') {
         if (!this.decoder || this.decoder.state !== 'configured') break
         // Bound the decoder's outstanding work: queued chunks plus pictures we
@@ -256,6 +385,7 @@ export class VideoPipeline {
       this.feedIdx = idx + 1
     }
     this._maybeFlush()
+    this._widenForReorder()
   }
 
   /**
@@ -288,7 +418,11 @@ export class VideoPipeline {
     const epoch = Math.floor(frame.timestamp / TS_SCALE)
     if (epoch !== this.epoch) { frame.close(); return }
     const idx = frame.timestamp - epoch * TS_SCALE
-    if (idx < this.anchorIdx - this.maxBehind || idx > this.anchorIdx + this.maxAhead + 4) {
+    // Recorded before the window has its say: a lead-in picture is thrown away
+    // but it is still proof the decoder is producing, which is what
+    // `_widenForReorder` needs to know.
+    if (idx > this._outIdx) this._outIdx = idx
+    if (idx < this.anchorIdx - this.maxBehind || idx > this._keepTo()) {
       frame.close()
       return
     }
@@ -322,7 +456,7 @@ export class VideoPipeline {
   }
 
   _store (idx, frame) {
-    if (idx < this.anchorIdx - this.maxBehind || idx > this.anchorIdx + this.maxAhead + 4) {
+    if (idx < this.anchorIdx - this.maxBehind || idx > this._keepTo()) {
       // Key-frame lead-in, or output that arrived after the anchor moved on.
       frame.close()
       return
@@ -335,7 +469,7 @@ export class VideoPipeline {
 
   _trim () {
     const lo = this.anchorIdx - this.maxBehind
-    const hi = this.anchorIdx + this.maxAhead + 4
+    const hi = this._keepTo()
     for (const [k, f] of this.buf) {
       if (k < lo || k > hi) { f.close(); this.buf.delete(k) }
     }

@@ -161,6 +161,8 @@ export class BvrPlayer {
     this.curIdx = -1
     this.pendingSeek = null
     this.ended = false
+    // Stream mode -> the decoder's reorder depth, learned once per file.
+    this._reorderSeen = new Map()
 
     // Scrubbing. `scrubTarget` is the position the pointer has reached while the
     // picture for an earlier one is still being decoded; the two settings are
@@ -202,6 +204,7 @@ export class BvrPlayer {
 
     try {
       this.blob = file
+      this._reorderSeen.clear()
       this.reader = new BlobReader(file)
       this.header = await parseFileHeader(this.reader)
       if (gen !== this._generation) return
@@ -288,10 +291,16 @@ export class BvrPlayer {
       throw new Error(`Unsupported video codec: ${codecInfo.label}. Browsers cannot decode this stream.`)
     }
 
+    // How much input each stream's decoder wanted, kept across a switch.
+    // Working it out costs a fraction of a second of the picture not moving --
+    // see VideoPipeline._feedAhead -- and paying that again every time someone
+    // compares the two streams is exactly the sort of thing to remember.
+    if (this.video && this.pstream) this._reorderSeen.set(this.pstream.mode, this.video.reorder)
     if (this.video) this.video.close()
     this.video = new VideoPipeline({
       reader: this.reader,
-      onError: (e) => this._onPipelineError(e)
+      onError: (e) => this._onPipelineError(e),
+      reorderHint: this._reorderSeen.get(pstream.mode) || 0
     })
     await this.video.open(pstream, codecInfo)
 
