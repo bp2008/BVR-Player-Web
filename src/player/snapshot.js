@@ -126,7 +126,7 @@ const pad = (v, n = 2) => String(v).padStart(n, '0')
  */
 export function snapshotName ({ fileName, utcMs, timeMs, frameIndex }, ext = 'jpg') {
   const parsed = parseBvrName(fileName || '')
-  const base = safe(String(fileName || 'snapshot').replace(/\.bvr$/i, ''))
+  const base = safe(String(fileName || 'snapshot').replace(/\.(bvr|mp4|m4v|mov)$/i, ''))
 
   if (utcMs > 0) {
     const d = new Date(utcMs)

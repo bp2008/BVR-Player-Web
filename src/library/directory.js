@@ -1,4 +1,5 @@
 import { parseBvrName } from './bvrName.js'
+import { isPlayableName } from '../container/open.js'
 
 /**
  * Getting at a folder of recordings, by whichever route the browser offers.
@@ -26,8 +27,14 @@ export function canBrowseDirectories () {
   return 'webkitdirectory' in document.createElement('input')
 }
 
-const isBvr = (name) => name.length > 4 && name.charCodeAt(name.length - 4) === 46 /* . */ &&
-  /\.bvr$/i.test(name)
+// A cheap rejection before the regular expression, because this runs once per
+// entry on folders that may hold tens of thousands. Four-character extensions
+// (.m4v, .mov) share the check with three-character ones by testing both dot
+// positions.
+const isRecording = (name) => (
+  (name.length > 4 && name.charCodeAt(name.length - 4) === 46 /* . */) ||
+  (name.length > 5 && name.charCodeAt(name.length - 5) === 46)
+) && isPlayableName(name)
 
 // Past this many recordings, listing stops reading per-file metadata up front:
 // see `listDirectory`. Below it, a folder is small enough that the old
@@ -153,7 +160,7 @@ export async function listDirectory (dir, { onProgress, signal } = {}) {
     // Counted before the filter: the cost is per directory entry, and half of
     // what Blue Iris writes is a `.dat` sidecar that never reaches the list.
     scanned++
-    if (handle.kind === 'file' && isBvr(handle.name)) {
+    if (handle.kind === 'file' && isRecording(handle.name)) {
       // The name is kept and the handle is dropped on the spot, so it becomes
       // garbage on this turn of the loop instead of being held for the session.
       entries.push(toEntry(handle.name, -1, 0, dir, null))
@@ -181,7 +188,7 @@ export function entriesFromFileList (files) {
   const out = []
   for (let i = 0; i < files.length; i++) {
     const file = files[i]
-    if (!isBvr(file.name)) continue
+    if (!isRecording(file.name)) continue
     out.push(toEntry(file.name, -1, 0, null, file))
   }
   return out
@@ -196,7 +203,7 @@ export function entriesFromFileList (files) {
 export function entriesFromNames (names, dir) {
   const out = []
   for (const name of names) {
-    if (isBvr(name)) out.push(toEntry(name, -1, 0, dir, null))
+    if (isRecording(name)) out.push(toEntry(name, -1, 0, dir, null))
   }
   return out
 }

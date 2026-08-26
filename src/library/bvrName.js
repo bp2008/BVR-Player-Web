@@ -16,18 +16,29 @@
  * configured name, spaces intact, and a local wall-clock time in place of the
  * compact UTC stamp. Both are recognised, because a folder of downloads is as
  * ordinary a thing to browse as a folder of recordings.
+ *
+ * Both patterns are honoured for MP4 files too. Blue Iris can record straight to
+ * MP4 as well as to BVR and names either the same way, and a clip this app has
+ * exported carries the source recording's name with the extension changed -- so
+ * a folder holding both kinds groups and sorts as one set rather than as two.
  */
 
-// <camera>.<YYYYMMDD>_<HHMMSS>[Z][ suffix ].bvr -- the trailing Z marks UTC,
-// and Blue Iris appends its own suffixes to continuation clips.
-const CLIP = /^(.+?)\.(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(Z?)(?:[._-][^.]*)?\.bvr$/i
+// Every extension a recording may arrive under; see `container/open.js`.
+const EXT = '(?:bvr|mp4|m4v|mov)'
+
+// <camera>.<YYYYMMDD>_<HHMMSS>[Z][ suffix ] -- the trailing Z marks UTC, and
+// Blue Iris appends its own suffixes to continuation clips.
+const CLIP = new RegExp(
+  `^(.+?)\\.(\\d{4})(\\d{2})(\\d{2})_(\\d{2})(\\d{2})(\\d{2})(Z?)(?:[._-][^.]*)?\\.${EXT}$`, 'i')
 
 // <camera> <YYYY-MM-DD> <hh>.<mm>.<ss>[ AM|PM][ (n)].bvr -- UI3's download name.
 // The colons a clock would use are illegal in a Windows file name, so the time
 // is dotted; the trailing `(2)` is what a browser adds when the same clip is
 // downloaded twice. There is no zone marker of any kind, and none is implied:
 // the time is the server's local time, so it is read as local.
-const UI3 = /^(.+?)[ _]+(\d{4})-(\d{2})-(\d{2})[ _]+(\d{1,2})[.\-](\d{2})[.\-](\d{2})(?:[ _]*([AP])\.?M\.?)?(?:[ _]*\(\d+\))?\.bvr$/i
+const UI3 = new RegExp(
+  `^(.+?)[ _]+(\\d{4})-(\\d{2})-(\\d{2})[ _]+(\\d{1,2})[.\\-](\\d{2})[.\\-](\\d{2})` +
+  `(?:[ _]*([AP])\\.?M\\.?)?(?:[ _]*\\(\\d+\\))?\\.${EXT}$`, 'i')
 
 /**
  * Turns a 12-hour clock reading into a 24-hour one. Noon and midnight are the

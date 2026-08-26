@@ -22,6 +22,7 @@
           <div v-if="endUtc"><dt>Ends</dt><dd>{{ formatUtc(endUtc) }}</dd></div>
           <div><dt>Duration</dt><dd>{{ formatTime(state.duration, false) }}</dd></div>
           <div v-if="orientation"><dt>Orientation</dt><dd>{{ orientation }}</dd></div>
+          <div><dt>Container</dt><dd>{{ containerName }}</dd></div>
           <div v-if="state.truncated"><dt>Tail</dt><dd class="kv--warn">truncated</dd></div>
           <div v-if="state.resyncs"><dt>Resynchronised</dt><dd class="kv--warn">{{ state.resyncs }}x</dd></div>
         </dl>
@@ -51,6 +52,44 @@
           <div v-if="state.switchingMode"><dt>Mode</dt><dd>switching (main when triggered)</dd></div>
           <div><dt>Audio</dt><dd>{{ state.hasAudio ? state.audioLabel : 'none' }}</dd></div>
         </dl>
+
+        <!-- What the container itself says, for an MP4. A BVR file's equivalent
+             is spread across the sections above, because its header is the only
+             structure it has. -->
+        <template v-if="mp4">
+          <h3 class="metasec__h">MP4 structure</h3>
+          <dl class="kv">
+            <div v-if="mp4.brands.major">
+              <dt>Brand</dt>
+              <dd>
+                {{ mp4.brands.major.trim() }}
+                <em v-if="mp4.brands.compatible.length" class="kv__aside">
+                  also {{ mp4.brands.compatible.join(' ') }}
+                </em>
+              </dd>
+            </div>
+            <div><dt>Timescale</dt><dd>{{ mp4.movieTimescale.toLocaleString() }} / s</dd></div>
+            <div>
+              <dt>Index</dt>
+              <dd>
+                {{ mp4.fragmented ? `${mp4.fragments.toLocaleString()} fragments` : 'moov sample table' }}
+                <em class="kv__aside">{{ formatBytes(mp4.moovBytes) }}</em>
+              </dd>
+            </div>
+            <div v-if="reorderedNote"><dt>Frame order</dt><dd>{{ reorderedNote }}</dd></div>
+          </dl>
+
+          <h3 class="metasec__h">Tracks <span class="metasec__badge">{{ mp4.tracks.length }}</span></h3>
+          <dl class="kv">
+            <div v-for="t in mp4Tracks" :key="t.id">
+              <dt>{{ t.title }}</dt>
+              <dd>
+                {{ t.detail }}
+                <em v-if="t.aside" class="kv__aside">{{ t.aside }}</em>
+              </dd>
+            </div>
+          </dl>
+        </template>
 
         <template v-if="aoi.length">
           <h3 class="metasec__h">Area of interest</h3>
@@ -83,8 +122,8 @@
           <div><dt>Payload</dt><dd>{{ formatBytes(frame.size) }} at {{ frame.offset.toLocaleString() }}</dd></div>
           <div><dt>Stream</dt><dd>{{ frame.stream }}</dd></div>
           <div><dt>Flags</dt><dd>{{ frame.flagText }}</dd></div>
-          <div><dt>Camera state</dt><dd>{{ frame.stateText }}</dd></div>
-          <div><dt>DIO inputs</dt><dd>{{ frame.dioText }}</dd></div>
+          <div v-if="hasCameraState"><dt>Camera state</dt><dd>{{ frame.stateText }}</dd></div>
+          <div v-if="hasCameraState"><dt>DIO inputs</dt><dd>{{ frame.dioText }}</dd></div>
         </dl>
 
         <h3 class="metasec__h">
@@ -92,7 +131,9 @@
           <span v-if="!state.hasMetadata" class="metasec__badge">no records</span>
         </h3>
         <p v-if="!state.hasMetadata" class="metasec__note">
-          This recording carries no overlay metadata frames.
+          {{ mp4
+            ? 'Overlay metadata is a Blue Iris feature of the BVR format; an MP4 carries none.'
+            : 'This recording carries no overlay metadata frames.' }}
         </p>
         <template v-else>
           <p v-if="!record" class="metasec__note">No overlay record applies at this position yet.</p>
@@ -134,7 +175,9 @@
       <!-- -------------------------------------------------------- timeline -->
       <section v-else class="metasec">
         <h3 class="metasec__h">Marks <span class="metasec__badge">{{ state.marks.length }}</span></h3>
-        <p v-if="!state.marks.length" class="metasec__note">No marks in this recording.</p>
+        <p v-if="!state.marks.length" class="metasec__note">
+          {{ mp4 ? 'Marks are written by Blue Iris into BVR files; an MP4 carries none.' : 'No marks in this recording.' }}
+        </p>
         <ul v-else class="metalist">
           <li v-for="(m, i) in shownMarks" :key="'m' + i">
             <button type="button" class="metalist__item" @click="$emit('seek', m.ts)">
@@ -190,6 +233,7 @@ import {
   MASK_FLAG_NAMES, STATE_BIT_NAMES
 } from '../bvr/constants.js'
 import { colorRefToCss, OBJ_GRAPHIC, OBJ_SHAPES, OBJ_TEXT } from '../bvr/metadata.js'
+import { containerLabel, hasBlueIrisExtras, streamNames } from '../container/mediaInfo.js'
 
 const LIST_LIMIT = 120
 
@@ -226,6 +270,54 @@ export default {
   computed: {
     header () { return this.context ? this.context.header : null },
     pstream () { return this.context ? this.context.pstream : null },
+    /** The MP4 structure block, or null for a BVR recording. */
+    mp4 () { return this.header && this.header.mp4 ? this.header.mp4 : null },
+    containerName () { return containerLabel(this.header) },
+    /**
+     * Whether the per-frame Blue Iris fields mean anything here. An MP4 has no
+     * camera state or digital inputs to report, and a row reading "none" for
+     * every frame of every file is worse than no row.
+     */
+    hasCameraState () { return hasBlueIrisExtras(this.header) },
+    /**
+     * Whether the file stores its frames out of the order they are shown.
+     *
+     * Worth surfacing because it is the one structural difference between the two
+     * containers that a viewer can actually notice: it is why an export of such a
+     * file carries composition offsets, and it is the thing most likely to be
+     * behind a playback oddity worth reporting.
+     */
+    reorderedNote () {
+      const tracks = this.mp4 ? this.mp4.tracks.filter((t) => t.kind === 'video' && t.reordered) : []
+      if (!tracks.length) return ''
+      return 'B-frames: stored out of display order'
+    },
+    /** One line per track, for the MP4 structure section. */
+    mp4Tracks () {
+      if (!this.mp4) return []
+      const kinds = { vide: 'Video', soun: 'Audio' }
+      let video = 0
+      let audio = 0
+      return this.mp4.tracks.map((t) => {
+        const kind = kinds[t.handler] || 'Other'
+        const n = t.kind === 'video' ? ++video : t.kind === 'audio' ? ++audio : 0
+        const many = this.mp4.tracks.filter((o) => o.kind === t.kind).length > 1
+        const bits = []
+        if (t.label) bits.push(t.label)
+        if (t.kind === 'video' && t.width) bits.push(`${t.width}×${t.height}`)
+        bits.push(`${t.samples.toLocaleString()} sample${t.samples === 1 ? '' : 's'}`)
+        const asides = []
+        if (t.entry) asides.push(t.entry.trim())
+        if (t.durationMs) asides.push(formatTime(t.durationMs, false))
+        if (t.editEntries) asides.push('edit list')
+        return {
+          id: t.id,
+          title: many ? `${kind} ${n}` : kind,
+          detail: bits.join(' · '),
+          aside: asides.join(', ')
+        }
+      })
+    },
     recordCount () {
       return this.context && this.context.index
         ? this.context.index.metadata.filter((m) => m.subtype === 2).length
@@ -260,11 +352,13 @@ export default {
           : ''
         rows.push({ name, encoded: `${w}×${h}`, declared, codec })
       }
+      // Named in whichever vocabulary the container uses; see `mediaInfo.js`.
+      const [mainName, subName] = streamNames(this.header, !!s.hasMainStream && !!s.hasSubStream)
       if (s.hasMainStream) {
-        add('Main', s.mainWidth, s.mainHeight, s.mainDeclaredWidth, s.mainDeclaredHeight, s.mainCodecLabel)
+        add(mainName, s.mainWidth, s.mainHeight, s.mainDeclaredWidth, s.mainDeclaredHeight, s.mainCodecLabel)
       }
       if (s.hasSubStream) {
-        add('Sub', s.subWidth, s.subHeight, s.subDeclaredWidth, s.subDeclaredHeight, s.subCodecLabel)
+        add(subName, s.subWidth, s.subHeight, s.subDeclaredWidth, s.subDeclaredHeight, s.subCodecLabel)
       }
       return rows
     },

@@ -447,6 +447,47 @@ rather than exceptional.
   which at two million comparisons is two seconds of frozen page against
   seventy-odd milliseconds.
 
+### Playing MP4 files
+
+`.mp4`, `.m4v` and `.mov` open with the same controls as a `.bvr` recording:
+scrubbing, frame stepping, digital zoom, snapshots, the speed control, the
+inspector and export all work unchanged. What a file *is* is decided from its
+first bytes rather than its name, so a recording that arrived with the wrong
+extension still opens.
+
+The things an MP4 cannot offer are the Blue Iris ones: overlay metadata, marks,
+segment starts, per-frame camera state and digital inputs, motion masks and areas
+of interest are all written by Blue Iris into the BVR container and have no MP4
+equivalent. The inspector says so in those places rather than showing empty
+sections, and it gains an **MP4 structure** section instead — brands, timescale,
+whether the index is a `moov` sample table or a run of fragments, and a line per
+track.
+
+Two differences are visible in ordinary use:
+
+- **It opens instantly.** A BVR file has no index, so opening one means reading
+  every byte to find out where its frames are. An MP4 wrote that table down, so
+  opening one reads `moov` and stops — a few megabytes however long the
+  recording is. The progress bar only appears for a fragmented file, where the
+  table has to be gathered from each fragment in turn.
+- **The streams are called what they are.** "Main" and "Sub" are Blue Iris's
+  words for two streams recorded in parallel, and they mean something that does
+  not apply to MP4. A file with one video track just says "Video"; one with two
+  says "Video 1" and "Video 2". Internally they still occupy the player's main
+  and sub slots — largest picture first — which is what lets the stream menu,
+  the coverage banding and the export's stream selection work without knowing
+  the difference.
+
+Audio is decoded from whatever the file states: AAC, MP3, Opus and FLAC through
+WebCodecs, and PCM, G.711 mu-law and A-law expanded in the player as BVR's own
+audio is. Unlike BVR, an MP4 states exactly when each audio packet starts, so
+none of the reconstruction described in spec section 6 is needed.
+
+Fragmented MP4 (`moof`/`trun`) is read as well as the ordinary indexed kind,
+which matters because it is what a recorder that may be killed mid-write
+produces. A file whose `moov` was never written cannot be played by anything and
+says so plainly.
+
 ### Metadata
 
 BVR carries more than pictures: overlay text and clocks, motion and AI bounding
@@ -486,11 +527,22 @@ hundred pixels wide cannot resolve a particular second. Times are read as
 `m:ss.mmm`, and shorthands work too: `12` is twelve seconds, `90:00` is ninety
 minutes.
 
-Audio is always re-encoded to AAC: none of the formats BVR carries (FLAC, PCM,
-G.711 µ-law) has an MP4 form players can be relied on to handle. Where the
-browser supports it, the file is written straight to disk as it is produced, so
-an export can be far larger than memory; otherwise it arrives as a Blob download,
-with a warning above 1.5 GB.
+Audio from a BVR recording is always re-encoded to AAC: none of the formats it
+carries (FLAC, PCM, G.711 µ-law) has an MP4 form players can be relied on to
+handle. Audio that is *already* AAC — which in practice means the source was an
+MP4 — is copied across instead, which is lossless, far faster, and the only audio
+path at all in a browser with no `AudioEncoder`.
+
+Exporting from an MP4 works the same way and is mostly a faster version of the
+same job, since its frames are already stored as MP4 samples and its parameter
+sets are already an `avcC`/`hvcC` — nothing has to be converted or gathered out
+of the bitstream on the way past. A source with B-frames is copied in decode
+order with its composition offsets rewritten; see *Decode order is a permutation*
+below for why that is not simply the frame table walked forwards.
+
+Where the browser supports it, the file is written straight to disk as it is
+produced, so an export can be far larger than memory; otherwise it arrives as a
+Blob download, with a warning above 1.5 GB.
 
 
 ## Working on the code
@@ -540,8 +592,12 @@ deploy to fix a problem stale-while-revalidate already solves.
 Video is decoded with [WebCodecs](https://developer.mozilla.org/docs/Web/API/WebCodecs_API).
 
 ```
-src/bvr/         format layer   - frame headers, file header, full-file index,
+src/container/   container seam - sniff and dispatch, and the documented contract
+                                  every reader below produces
+src/bvr/         BVR reader     - frame headers, file header, full-file index,
                                   codec probe, overlay metadata, tail scan
+src/mp4/         MP4 reader     - ISO box walk, sample tables, fragments, sample
+                                  entry -> WebCodecs configuration
 src/player/      playback       - decode pipelines, media clock, canvas renderer,
                                   zoom/pan gestures, overlay painting
 src/library/     folder browser - directory access, virtual list rows, thumbnail
@@ -552,6 +608,15 @@ src/util/        shared rules   - aspect correction, settings, formatting, keys
 src/components/  Vue 3 UI (Options API)
 ```
 
+- **One seam, two containers.** `src/container/open.js` is the only code in the
+  app that knows what a container is. It sniffs the opening bytes and hands back
+  the same three objects either way — a `header` describing the recording, an
+  `index` of frame tables, and a `probe` saying whether this device can decode
+  any of it. Everything above it works from those alone, which is why MP4
+  support did not need the pipelines, the renderer, the scrub bar or the export
+  rewritten. The fields each reader fills are written down in
+  `src/container/mediaInfo.js`, because that contract used to be implicit in a
+  BVR file header half a dozen modules reached into.
 - **Indexing.** BVR has no index or trailer, so the whole file is scanned once on
   open to build a frame table (offset, size, timestamp, UTC, flags) per stream.
   Every seek is then exact and needs no searching. Corrupt regions are
@@ -796,6 +861,54 @@ What a stream's decoder turned out to want is remembered per stream for as long
 as the file is open, so switching between main and sub does not pay for the
 discovery twice. It looked like the decoder was being left dirty by a switch; it
 was the measurement being thrown away with the old pipeline.
+
+### Decode order is a permutation, not a second timeline
+
+BVR guarantees that frames decode in the order they are shown (spec 5.4), and the
+whole player was built on it: `ts[]` is binary-searched for a seek, the feed walks
+the frame table forwards, key-frame back-references point backwards, and the
+frame counter counts the frames on screen. MP4 makes no such promise. Any file
+with B-frames stores its samples in one order and shows them in another, and
+three of those four assumptions break at once.
+
+The obvious fix — keep the table in decode order and translate on the way out —
+was rejected because it puts the translation in every consumer. The scrub bar,
+the frame counter, single-frame stepping, the coverage banding, the export's trim
+range and the metadata panel all count frames, and all of them would have had to
+learn a second ordering.
+
+So the table stays in *presentation* order, which is the order everything above
+the pipeline already means, and decode order is carried beside it as a
+permutation:
+
+```
+feedOrder[step]  the frame to feed at decode step `step`
+feedPos[i]       the decode step at which frame i is fed
+feedHigh[i]      the highest decode step among frames 0..i
+```
+
+Only `VideoPipeline` reads them, and only in three places: what to feed next,
+where to restart after a seek, and how far ahead it may run. On a stream that
+does not reorder — every BVR recording, and most surveillance MP4s — the arrays
+are absent, a step *is* a frame index, and the code path is exactly what it was.
+
+`feedHigh` is the subtle one, and it is the difference between working and
+deadlocking. The feed has to be bounded or it would decode the whole file, but a
+bound expressed in presentation order can refuse to send the very chunk the
+decoder is waiting for: in decode order `I P B B`, the `P` is shown *last* and so
+looks far ahead, while the two `B`s shown next cannot be decoded without it.
+Stopping at "anchor + N frames" therefore stalls with the decoder holding
+everything and the feed convinced it has run too far ahead. `feedHigh[i]` is the
+highest decode step among the first `i` frames, so feeding every step up to it
+guarantees each of those frames has been handed over, and it never runs further
+ahead than the stream's own reorder depth requires.
+
+The same permutation is what lets an export copy such a file: the samples are
+written in decode order and timed by their decode timestamps, with each frame's
+presentation time riding along so the muxer can write the composition offsets
+back out. `sample/_check/testMp4Export.mjs` checks this by round trip — demux the
+output and confirm it presents the same frames, in the same order, with the same
+bytes as the source.
 
 ### The frame window is sized once and then left alone
 

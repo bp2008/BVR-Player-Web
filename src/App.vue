@@ -59,13 +59,14 @@
             <AppIcon name="film" :size="46" />
             <h1 class="dropzone__title">BVR Player</h1>
             <p class="dropzone__text">
-              Drop a Blue Iris <code>.bvr</code> recording here, or choose one to open.
-              Files are decoded locally in your browser and never uploaded.
+              Drop a Blue Iris <code>.bvr</code> recording or an <code>.mp4</code> here,
+              or choose one to open. Files are decoded locally in your browser and
+              never uploaded.
             </p>
             <div class="dropzone__buttons">
               <button type="button" class="btn btn--accent" @click.stop="pickFile">
                 <AppIcon name="folder" :size="18" />
-                <span>Open .bvr file</span>
+                <span>Open a recording</span>
               </button>
               <button v-if="canBrowse" type="button" class="btn" @click.stop="openLibrary">
                 <AppIcon name="library" :size="18" />
@@ -248,7 +249,7 @@
     />
 
     <div v-if="dragDepth > 0" class="dragmask">
-      <div class="dragmask__inner">Drop the .bvr file to open it</div>
+      <div class="dragmask__inner">Drop the recording to open it</div>
     </div>
 
     <transition name="toast">
@@ -265,7 +266,7 @@
       ref="fileInput"
       class="hidden-input"
       type="file"
-      accept=".bvr,application/octet-stream"
+      accept=".bvr,.mp4,.m4v,.mov,video/mp4,video/quicktime,application/octet-stream"
       @change="onFileInput"
     />
   </div>
@@ -598,7 +599,7 @@ export default {
       if (files && files.length) this.openFile(files[0])
     },
     async consumeLaunchFiles () {
-      // PWA file handler: opening a .bvr from the OS shell once installed.
+      // PWA file handler: opening a recording from the OS shell once installed.
       if (!('launchQueue' in window)) return
       try {
         window.launchQueue.setConsumer(async (params) => {

@@ -358,16 +358,48 @@ export function concat (parts) {
   return out
 }
 
-/** Sample entry to use for a given source FourCC, or null when MP4 has none. */
+/**
+ * Sample entry to use for a given source stream tag, or null when MP4 has none.
+ *
+ * The tag is a BVR FourCC where the source is a BVR recording and an MP4 sample
+ * entry type where it is an MP4, because that is what each container calls the
+ * same thing. Mapping both here is what lets an MP4 be exported -- trimmed, or
+ * with one of two video tracks picked -- by the same copy path a BVR uses.
+ *
+ * `avc3` and `hev1` differ from `avc1`/`hvc1` only in carrying their parameter
+ * sets in the samples as well as in the sample entry. Writing them out as the
+ * latter is safe: the parameter sets stay where they are, and a decoder that
+ * meets them again in the bitstream ignores them.
+ */
+const SAMPLE_ENTRIES = {
+  H264: 'avc1',
+  H265: 'hvc1',
+  avc1: 'avc1',
+  avc3: 'avc1',
+  hvc1: 'hvc1',
+  hev1: 'hvc1'
+}
+
 export function sampleEntryFor (fourcc) {
-  if (fourcc === 'H264') return 'avc1'
-  if (fourcc === 'H265') return 'hvc1'
-  return null
+  return SAMPLE_ENTRIES[fourcc] || null
 }
 
 /** Whether a stream can be copied into MP4 without re-encoding. */
 export function canRemux (fourcc) {
   return sampleEntryFor(fourcc) !== null
+}
+
+/**
+ * Whether a source's samples are already in MP4 form.
+ *
+ * BVR stores Annex-B access units that have to be rewritten with length prefixes
+ * before they can be a sample; an MP4's samples are already exactly that, so
+ * copying one into another container is a byte-for-byte move. The parameter sets
+ * are likewise already in hand as an `avcC`/`hvcC`, so nothing has to be
+ * collected from the bitstream on the way past.
+ */
+export function isLengthPrefixed (fourcc) {
+  return fourcc === 'avc1' || fourcc === 'avc3' || fourcc === 'hvc1' || fourcc === 'hev1'
 }
 
 export function buildDecoderConfig (fourcc, params) {

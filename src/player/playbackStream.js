@@ -2,6 +2,7 @@ import {
   FLAG_ISKEY, FLAG_ISDISCONTINUITY, STREAM_MAIN, STREAM_SUB
 } from '../bvr/constants.js'
 import { planRuns, planSegments } from './coverage.js'
+import { streamLabelFor } from '../container/mediaInfo.js'
 
 /** Which streams hold frames and can actually be decoded on this device. */
 function usableStreams (index, playable) {
@@ -59,6 +60,16 @@ export function planAuto (index, header, playable = [true, true], sizes = null) 
   const ranked = rankStreams(index, header, sizes, usableStreams(index, playable))
   if (ranked.length < 2) return { ranked, runs: [], used: ranked }
 
+  // A stream whose frames decode out of the order they are shown cannot be cut
+  // into and spliced with another: a run boundary would land in the middle of a
+  // group the decoder has to be given whole, and the merged sequence has no way
+  // to express two different decode orders at once. Nothing that reorders is
+  // ever a switching-mode recording -- only Blue Iris writes those, and it never
+  // uses B-frames -- so falling back to the better stream alone costs nothing.
+  if (ranked.some((si) => index.streams[si].reordered)) {
+    return { ranked, runs: [], used: ranked.slice(0, 1) }
+  }
+
   const fallbackMs = header.frameInterval > 0 ? header.frameInterval / 1000 : 40
   const runs = planRuns(index, planSegments(index, ranked, fallbackMs))
   const used = ranked.filter((si) => runs.some((r) => r.src === si))
@@ -102,15 +113,22 @@ export function buildPlaybackStream (index, header, mode, playable = [true, true
     // the codec problem in its own words.
     const si = used.length ? used[0]
       : index.streams[STREAM_MAIN].count > 0 ? STREAM_MAIN : STREAM_SUB
-    return decorate(index.streams[si], si, header, index, sizes, autoLabel(si, ranked))
+    const both = index.streams[STREAM_MAIN].count > 0 && index.streams[STREAM_SUB].count > 0
+    return decorate(index.streams[si], si, header, index, sizes, autoLabel(si, ranked, header, both))
   }
   return merge(index, header, sizes, runs, used)
 }
 
-function autoLabel (si, ranked) {
-  return ranked.length > 1
-    ? `Auto (${si === STREAM_SUB ? 'sub' : 'main'})`
-    : (si === STREAM_SUB ? 'Sub stream' : 'Main stream')
+/**
+ * What to call an `auto` sequence that turned out to need only one stream.
+ *
+ * Where the file has a second stream to choose between, the label says which one
+ * automatic settled on; where it does not, "auto" is a distinction without a
+ * difference and the stream simply names itself.
+ */
+function autoLabel (si, ranked, header, both) {
+  const name = streamLabelFor(header.container, si, both)
+  return ranked.length > 1 ? `Auto (${name.toLowerCase().replace(' stream', '')})` : name
 }
 
 /** Concatenates the planned runs into one sequence. */
@@ -144,7 +162,8 @@ function merge (index, header, sizes, runs, used) {
   out.sources = used
   out.sourceSizes = sourceSizes
   out.codecSource = used[0]
-  out.streamLabel = 'Auto (main + sub)'
+  const names = used.map((si) => streamLabelFor(header.container, si, true).toLowerCase().replace(' stream', ''))
+  out.streamLabel = `Auto (${names.join(' + ')})`
   out.width = Math.max(...shapes.map((s) => s.width))
   out.height = Math.max(...shapes.map((s) => s.height))
   out.fourcc = header.bmih[used[0]]?.fourcc || header.bmih[0]?.fourcc || ''
@@ -172,6 +191,12 @@ function emptyStream (count) {
     srcIndex: new Int32Array(count),
     keyIdx: new Int32Array(count),
     keys: null,
+    // A merged sequence is always fed in the order it is shown; see `planAuto`,
+    // which refuses to merge a stream whose frames decode out of order.
+    feedOrder: null,
+    feedPos: null,
+    feedHigh: null,
+    reordered: false,
     variableResolution: false,
     mixedCodecs: false,
     sources: null,
@@ -218,6 +243,8 @@ function sizeOf (header, sizes, si) {
 }
 
 function decorate (src, si, header, index, sizes, label) {
+  // Two video streams in the file, whichever of them this sequence is playing.
+  const both = index.streams[STREAM_MAIN].count > 0 && index.streams[STREAM_SUB].count > 0
   const bmih = header.bmih[si] || header.bmih[0]
   const size = sizeOf(header, sizes, si)
   const sourceSizes = []
@@ -235,13 +262,21 @@ function decorate (src, si, header, index, sizes, label) {
     srcIndex: null,
     keyIdx: src.keyIdx,
     keys: src.keys,
+    // Only an MP4 with B-frames sets these; see `mediaInfo.js` and
+    // `VideoPipeline._seqAt`. A single-stream sequence is the source table
+    // verbatim, so the permutation comes along untouched.
+    feedOrder: src.feedOrder || null,
+    feedPos: src.feedPos || null,
+    feedHigh: src.feedHigh || null,
+    dts: src.dts || null,
+    reordered: !!src.reordered,
     variableResolution: false,
     mixedCodecs: false,
     sources: [si],
     sourceSizes,
     codecSource: si,
     mode: si === STREAM_SUB ? 'sub' : 'main',
-    streamLabel: label || (si === STREAM_SUB ? 'Sub stream' : 'Main stream'),
+    streamLabel: label || streamLabelFor(header.container, si, both),
     width: size.width,
     height: size.height,
     fourcc: bmih?.fourcc || '',

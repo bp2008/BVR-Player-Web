@@ -1,7 +1,6 @@
 import { BlobReader } from '../bvr/blobReader.js'
-import { parseFileHeader } from '../bvr/parseFileHeader.js'
-import { buildIndex, frameIndexForTime } from '../bvr/indexer.js'
-import { probeVideoStreams, probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
+import { frameIndexForTime } from '../bvr/indexer.js'
+import { openContainer } from '../container/open.js'
 import {
   autoStreamSources, buildPlaybackStream, resolveStreamMode, estimateFrameInterval, collectMarkers
 } from './playbackStream.js'
@@ -51,6 +50,9 @@ export function createBlankState () {
     loadProgress: 0,
     fileName: '',
     fileSize: 0,
+    // Which container the open file is: 'bvr' or 'mp4'. The panels use it to
+    // stop offering things the format has no answer for.
+    container: '',
     playing: false,
     buffering: false,
     ended: false,
@@ -160,6 +162,8 @@ export class BvrPlayer {
     this.codecInfo = null
     this.probe = null
     this.blob = null
+    this.container = ''
+    this.movie = null
 
     this.streamMode = 'auto'
     this.matchAspect = true
@@ -217,34 +221,36 @@ export class BvrPlayer {
       this.blob = file
       this._reorderSeen.clear()
       this.reader = new BlobReader(file)
-      this.header = await parseFileHeader(this.reader)
-      if (gen !== this._generation) return
 
-      // Codec support is settled from the first key frames, before the scan that
-      // reads the rest of the file. A machine with no HEVC decoder should hear so
-      // in the first moment rather than after a gigabyte has gone past, and a
-      // file whose main stream cannot be decoded here may still have a sub
-      // stream that can.
-      this.probe = await probeVideoStreams(this.reader, this.header)
-      if (gen !== this._generation) return
-      this._emitProbe()
-      if (this.probe.decided && !this.probe.anySupported) throw new Error(this.probe.summary)
-
-      this.index = await buildIndex(this.reader, this.header, {
+      // One call for both formats; `container/open.js` is the only code left in
+      // the app that knows the difference. The probe arrives through a callback
+      // rather than with everything else because a BVR file has to be read end
+      // to end before its frame table exists, and a machine with no HEVC decoder
+      // should hear so in the first moment rather than after a gigabyte has gone
+      // past. An MP4 reaches the same point at once and reports the same way.
+      const opened = await openContainer(this.reader, {
+        onProbe: (probe, header) => {
+          if (gen !== this._generation) return
+          this.header = header
+          this.probe = probe
+          this._emitProbe()
+        },
         onProgress: (p) => { if (gen === this._generation) this._emit({ loadProgress: p }) },
         shouldStop: () => gen !== this._generation
       })
       if (gen !== this._generation) return
 
+      this.container = opened.container
+      this.header = opened.header
+      this.index = opened.index
+      this.probe = opened.probe
+      this.movie = opened.movie || null
+      this._emit({ container: opened.container })
+      this._emitProbe()
+
       if (this.index.streams[0].count === 0 && this.index.streams[1].count === 0) {
         throw new Error('This file contains no video frames.')
       }
-
-      // A stream whose frames start only later in the file was invisible to the
-      // opening probe; the index now points straight at its first key frame.
-      await this._probeMissedStreams()
-      if (gen !== this._generation) return
-      this._emitProbe()
       if (!this.probe.anySupported) throw new Error(this.probe.summary)
 
       this.renderer.setOrientation(this.header.rotation, this.header.flipH)
@@ -569,18 +575,6 @@ export class BvrPlayer {
     this._emit({ ended: true, currentTime: this.clock.currentTime })
   }
 
-  async _probeMissedStreams () {
-    let changed = false
-    for (let si = 0; si < 2; si++) {
-      const known = this.probe.streams[si]
-      if (this.index.streams[si].count === 0) continue
-      if (known && known.hasKeyFrame) continue
-      const info = await probeIndexedStream(this.reader, this.header, this.index, si)
-      if (info) { this.probe.streams[si] = info; changed = true }
-    }
-    if (changed) this.probe = summarizeProbe(this.probe.streams)
-  }
-
   _emitProbe () {
     const [main, sub] = this.probe.streams
     const pick = (main && main.supported) ? main : (sub && sub.supported) ? sub : (main || sub)
@@ -633,7 +627,8 @@ export class BvrPlayer {
       return
     }
     this.audio = pipeline
-    this._emit({ hasAudio: true, audioLabel: audioCodecLabel(this.header.wfx) })
+    const declared = this.header.audioConfig && this.header.audioConfig.label
+    this._emit({ hasAudio: true, audioLabel: declared || audioCodecLabel(this.header.wfx) })
   }
 
   _setupMetadata () {
@@ -727,6 +722,8 @@ export class BvrPlayer {
     this.probe = null
     this.pstream = null
     this.blob = null
+    this.container = ''
+    this.movie = null
     this.curIdx = -1
     this.pendingSeek = null
     this.scrubTarget = null

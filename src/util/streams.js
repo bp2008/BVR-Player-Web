@@ -5,6 +5,8 @@
  * describe the same file differently.
  */
 
+import { streamNames } from '../container/mediaInfo.js'
+
 const dims = (w, h) => (w > 0 && h > 0 ? `${w}\u00d7${h}` : '')
 
 /** A stream is offerable only if it is in the file and this device can decode it. */
@@ -47,10 +49,17 @@ function autoDetail (state) {
   )
 }
 
+/** The two streams' names, in this file's vocabulary. See `mediaInfo.js`. */
+function names (state) {
+  const both = !!state.hasMainStream && !!state.hasSubStream
+  return streamNames({ container: state.container }, both)
+}
+
 function autoName (state) {
   const list = autoSources(state)
-  if (list.length > 1) return 'Auto (main + sub)'
-  if (list.length === 1) return list[0] === 1 ? 'Auto (sub)' : 'Auto (main)'
+  const [a, b] = names(state).map((n) => n.toLowerCase())
+  if (list.length > 1) return `Auto (${a} + ${b})`
+  if (list.length === 1) return `Auto (${list[0] === 1 ? b : a})`
   return 'Auto'
 }
 
@@ -65,6 +74,7 @@ export function streamOptions (state) {
   const ok = playable(state)
   const mainWhy = unavailable(state, 'main')
   const subWhy = unavailable(state, 'sub')
+  const [mainName, subName] = names(state)
   const list = [
     {
       value: 'auto',
@@ -74,14 +84,14 @@ export function streamOptions (state) {
     },
     {
       value: 'main',
-      name: 'Main',
+      name: mainName,
       detail: mainWhy || dims(state.mainWidth, state.mainHeight),
       disabled: !ok.main,
       title: mainWhy === 'no decoder' ? `${state.mainCodecLabel} cannot be decoded on this device` : ''
     },
     {
       value: 'sub',
-      name: 'Sub',
+      name: subName,
       detail: subWhy || dims(state.subWidth, state.subHeight),
       disabled: !ok.sub,
       title: subWhy === 'no decoder' ? `${state.subCodecLabel} cannot be decoded on this device` : ''

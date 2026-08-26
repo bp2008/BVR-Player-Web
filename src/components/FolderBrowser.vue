@@ -186,7 +186,7 @@
           <AppIcon name="library" :size="34" />
           <p class="library__lead">Browse a folder of recordings</p>
           <p class="library__hint">
-              Every <code>.bvr</code> file in the folder is listed with a thumbnail from its first
+              Every <code>.bvr</code> and <code>.mp4</code> file in the folder is listed with a thumbnail from its first
               key frame.
           </p>
           <p class="library__hint">
@@ -602,7 +602,7 @@ export default {
         this.dirName = this.folderNameOf(files)
         this.dirHandle = null
         this.setEntries(entries)
-        if (!entries.length) this.error = 'That folder holds no .bvr recordings.'
+        if (!entries.length) this.error = 'That folder holds no recordings.'
       }
       event.target.value = ''
     },
@@ -684,7 +684,7 @@ export default {
           this.listedAt = Date.now()
           saveListing(this.dirName, entries.map((e) => e.name), scanned)
         } else {
-          this.error = 'That folder holds no .bvr recordings.'
+          this.error = 'That folder holds no recordings.'
           clearListing(this.dirName)
         }
       } catch (e) {

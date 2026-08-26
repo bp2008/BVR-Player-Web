@@ -5,6 +5,8 @@ import { findLastFrame } from '../bvr/tail.js'
 import { describeVideoCodec } from '../bvr/codec.js'
 import { STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 import { audioCodecLabel } from '../player/audioCodecs.js'
+import { sniffContainer } from '../container/open.js'
+import { openMp4 } from '../mp4/openMp4.js'
 
 /**
  * One poster frame and a summary line per clip, without playing anything.
@@ -16,6 +18,12 @@ import { audioCodecLabel } from '../player/audioCodecs.js'
  *
  * Everything here is worker-safe -- Blob, WebCodecs and OffscreenCanvas only, no
  * DOM -- because this is the module the thumbnail worker loads.
+ *
+ * An MP4 is cheaper still. It carries its own index, so the duration and the
+ * position of the first key frame are read out of `moov` rather than hunted for
+ * from both ends of the file, and the picture is decoded from a sample entry
+ * that already says what it is. Only the two ways of finding that key frame
+ * differ; everything from the decode onwards is shared.
  */
 
 // A whole key frame has to be read, not just its front: a partial payload
@@ -189,51 +197,101 @@ async function encode (canvas) {
 export async function describeClip (blob, { maxWidth = THUMB_WIDTH, maxHeight = THUMB_HEIGHT } = {}) {
   const reader = new BlobReader(blob, 512 << 10)
   try {
-    const header = await parseFileHeader(reader)
-    const { keys, seen } = await findFirstKeys(reader, header)
-    const si = preferredStream(keys, seen, header)
-    const bmih = header.bmih[si] || header.bmih[0]
-    const key = keys[si] || keys[si === STREAM_SUB ? STREAM_MAIN : STREAM_SUB]
-
-    let keyBytes = null
-    if (key) keyBytes = await reader.readCopy(key.offset, Math.min(key.size, MAX_KEY_BYTES))
-    const codec = describeVideoCodec(bmih ? bmih.fourcc : '', keyBytes, bmih)
-
-    const last = await findLastFrame(reader, header)
-    const info = {
-      width: codec.width,
-      height: codec.height,
-      codecLabel: codec.label,
-      fourcc: bmih ? bmih.fourcc : '',
-      decodable: codec.kind !== 'unsupported',
-      hasAudio: header.hasAudio,
-      audioLabel: header.hasAudio ? audioCodecLabel(header.wfx) : '',
-      dualStream: !!header.hasSubHeader,
-      switchingMode: !!header.switchingMode,
-      rotation: header.rotation,
-      fps: header.fps,
-      startUtc: header.startUtc || 0,
-      // The first frame's timestamp is the recording's origin, so the last
-      // frame's is the length outright (spec 9.3).
-      durationMs: last ? Math.max(0, last.ts) : 0,
-      endUtc: last ? last.utc : 0,
-      truncated: false
-    }
-
-    let thumbnail = null
-    if (keyBytes) {
-      const frame = await decodeKeyFrame(keyBytes, codec)
-      if (frame) {
-        const painted = await paint(frame, header, maxWidth, maxHeight)
-        frame.close()
-        if (painted) {
-          const encoded = await encode(painted.canvas)
-          if (encoded) thumbnail = { blob: encoded, width: painted.width, height: painted.height }
-        }
-      }
-    }
-    return { info, thumbnail }
+    const kind = await sniffContainer(reader)
+    return kind === 'mp4'
+      ? await describeMp4Clip(reader, maxWidth, maxHeight)
+      : await describeBvrClip(reader, maxWidth, maxHeight)
   } finally {
     reader.release()
   }
+}
+
+/**
+ * The MP4 route to the same result.
+ *
+ * The smaller video track is preferred where a file has two, for the same reason
+ * the BVR route prefers the sub stream: it decodes faster and scales down to a
+ * thumbnail better.
+ */
+async function describeMp4Clip (reader, maxWidth, maxHeight) {
+  const { header, index, probe } = await openMp4(reader)
+  const si = index.streams[1].count > 0 ? 1 : 0
+  const stream = index.streams[si]
+  const described = probe.streams[si]
+  const codec = described ? described.codec : null
+
+  const ki = stream.keys.length ? stream.keys[0] : -1
+  let keyBytes = null
+  if (ki >= 0) keyBytes = await reader.readCopy(stream.offset[ki], Math.min(stream.size[ki], MAX_KEY_BYTES))
+
+  const track = header.mp4.tracks.find((t) => t.kind === 'video') || {}
+  const info = {
+    width: codec ? codec.width : track.width || 0,
+    height: codec ? codec.height : track.height || 0,
+    codecLabel: codec ? codec.label : track.label || '',
+    fourcc: header.bmih[0] ? header.bmih[0].fourcc : '',
+    decodable: !!(described && described.supported),
+    hasAudio: header.hasAudio,
+    audioLabel: header.audioConfig ? header.audioConfig.label : '',
+    dualStream: !!header.hasSubHeader,
+    switchingMode: false,
+    rotation: header.rotation,
+    fps: header.fps,
+    startUtc: header.startUtc || 0,
+    durationMs: index.durationMs,
+    endUtc: index.endUtc,
+    truncated: index.truncated
+  }
+
+  let thumbnail = null
+  if (keyBytes && codec) thumbnail = await renderThumbnail(keyBytes, codec, header, maxWidth, maxHeight)
+  return { info, thumbnail }
+}
+
+/** Decodes one key frame and turns it into the stored thumbnail blob. */
+async function renderThumbnail (keyBytes, codec, header, maxWidth, maxHeight) {
+  const frame = await decodeKeyFrame(keyBytes, codec)
+  if (!frame) return null
+  const painted = await paint(frame, header, maxWidth, maxHeight)
+  frame.close()
+  if (!painted) return null
+  const encoded = await encode(painted.canvas)
+  return encoded ? { blob: encoded, width: painted.width, height: painted.height } : null
+}
+
+async function describeBvrClip (reader, maxWidth, maxHeight) {
+  const header = await parseFileHeader(reader)
+  const { keys, seen } = await findFirstKeys(reader, header)
+  const si = preferredStream(keys, seen, header)
+  const bmih = header.bmih[si] || header.bmih[0]
+  const key = keys[si] || keys[si === STREAM_SUB ? STREAM_MAIN : STREAM_SUB]
+
+  let keyBytes = null
+  if (key) keyBytes = await reader.readCopy(key.offset, Math.min(key.size, MAX_KEY_BYTES))
+  const codec = describeVideoCodec(bmih ? bmih.fourcc : '', keyBytes, bmih)
+
+  const last = await findLastFrame(reader, header)
+  const info = {
+    width: codec.width,
+    height: codec.height,
+    codecLabel: codec.label,
+    fourcc: bmih ? bmih.fourcc : '',
+    decodable: codec.kind !== 'unsupported',
+    hasAudio: header.hasAudio,
+    audioLabel: header.hasAudio ? audioCodecLabel(header.wfx) : '',
+    dualStream: !!header.hasSubHeader,
+    switchingMode: !!header.switchingMode,
+    rotation: header.rotation,
+    fps: header.fps,
+    startUtc: header.startUtc || 0,
+    // The first frame's timestamp is the recording's origin, so the last
+    // frame's is the length outright (spec 9.3).
+    durationMs: last ? Math.max(0, last.ts) : 0,
+    endUtc: last ? last.utc : 0,
+    truncated: false
+  }
+
+  let thumbnail = null
+  if (keyBytes) thumbnail = await renderThumbnail(keyBytes, codec, header, maxWidth, maxHeight)
+  return { info, thumbnail }
 }

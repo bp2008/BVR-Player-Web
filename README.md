@@ -1,7 +1,7 @@
 # BVR-Player-Web
 
-A web-based player for Blue Iris `.bvr` files. Everything runs locally in the
-browser.  Your files are never uploaded anywhere.
+A web-based player for Blue Iris `.bvr` files and MP4 video. Everything runs
+locally in the browser.  Your files are never uploaded anywhere.
 
 When opening a folder of files, *the browser may say* it is going to upload files to *this site*, but in reality "this site" is just a static HTML file running in your web browser.  **Your files will not actually be uploaded anywhere.**
 
@@ -9,8 +9,9 @@ When opening a folder of files, *the browser may say* it is going to upload file
 
 https://bp2008.github.io/BVR-Player-Web/
 
-Open the player, then drag a `.bvr` file onto the page or press **Open**. Press
-**Browse** to page through a whole folder of recordings with thumbnails.
+Open the player, then drag a `.bvr` or `.mp4` file onto the page or press
+**Open**. Press **Browse** to page through a whole folder of recordings with
+thumbnails.
 
 Also includes a folder browser with thumbnails.
 

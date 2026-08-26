@@ -5,13 +5,22 @@ const LOOKAHEAD_MS = 700
 const MAX_SCHEDULED = 24
 
 /**
- * Decodes BVR audio packets and schedules them on a WebAudio graph.
+ * Decodes audio packets and schedules them on a WebAudio graph.
  *
- * Timing note (spec section 6): packet `timestamp` is unreliable as a start
- * time -- FLAC packets are stamped near their *end*, and legacy files stamp
- * every packet 0. The audio stream is however continuous from the first video
- * frame, so packet start times are reconstructed from cumulative sample counts,
- * which the frame table alone is enough to compute.
+ * Two things vary by container and nothing else does.
+ *
+ * *What the packets are.* A BVR file describes its audio with a WAVEFORMATEX and
+ * leaves the reader to work out the rest; an MP4 states the decoder
+ * configuration outright in its sample entry. So the container hands over an
+ * `audioConfig` when it knows one -- `kind: 'codec'` for anything WebCodecs
+ * decodes, `kind: 'raw'` for PCM and G.711, which are expanded here -- and the
+ * BVR path leaves it null and is derived from the WAVEFORMATEX as before.
+ *
+ * *When they start.* Spec section 6 warns that a BVR packet's `timestamp` is not
+ * a start time: FLAC packets are stamped near their *end*, and legacy files stamp
+ * every packet 0. The stream is continuous from the first video frame, so the
+ * starts are reconstructed from cumulative sample counts. An MP4 simply states
+ * them, and hands them over in `index.audio.starts`.
  */
 export class AudioPipeline {
   constructor ({ reader, index, header, clock, onError, onStatus }) {
@@ -29,9 +38,13 @@ export class AudioPipeline {
     this.gain = null
     this.decoder = null
     this.simpleDecode = null
+    this._decoderConfig = null
 
-    this.sampleRate = this.wfx.nSamplesPerSec
-    this.channels = Math.max(1, this.wfx.nChannels)
+    // What the container said outright, where it said anything.
+    this.audioConfig = header.audioConfig || null
+    const stated = this.audioConfig && this.audioConfig.config
+    this.sampleRate = (stated && stated.sampleRate) || this.wfx.nSamplesPerSec
+    this.channels = Math.max(1, (stated && stated.numberOfChannels) || this.wfx.nChannels)
     this.startMs = 0
     this.packetStartMs = null
 
@@ -49,19 +62,31 @@ export class AudioPipeline {
     const a = this.index.audio
     if (!this.header.hasAudio || a.count === 0 || !this.sampleRate) return false
 
-    // Legacy/odd files stamp every packet 0; the stream still starts where the
-    // video does, so the origin is 0 rather than that meaningless stamp.
-    const rawFirst = a.ts[0] + this.index.baseTs
-    this.startMs = rawFirst === 0 && this.index.baseTs > 0 ? 0 : a.ts[0]
+    if (a.starts && a.starts.length === a.count) {
+      // The container knows exactly when each packet begins; nothing to rebuild.
+      this.packetStartMs = a.starts
+      this.startMs = a.starts[0]
+    } else {
+      // Legacy/odd files stamp every packet 0; the stream still starts where the
+      // video does, so the origin is 0 rather than that meaningless stamp.
+      const rawFirst = a.ts[0] + this.index.baseTs
+      this.startMs = rawFirst === 0 && this.index.baseTs > 0 ? 0 : a.ts[0]
 
-    const starts = packetStartTimes(this.wfx, a, this.header.audioExtradata)
-    if (!starts) return false
-    // packetStartTimes anchors on the stored first timestamp; re-anchor onto the
-    // origin worked out above.
-    const shift = this.startMs - a.ts[0]
-    this.packetStartMs = shift === 0 ? starts : starts.map((t) => t + shift)
+      const starts = packetStartTimes(this.wfx, a, this.header.audioExtradata)
+      if (!starts) return false
+      // packetStartTimes anchors on the stored first timestamp; re-anchor onto
+      // the origin worked out above.
+      const shift = this.startMs - a.ts[0]
+      this.packetStartMs = shift === 0 ? starts : starts.map((t) => t + shift)
+    }
 
-    this.simpleDecode = makeSimpleDecoder(this.wfx)
+    // A container that named a WebCodecs codec is decoded by WebCodecs, whatever
+    // the WAVEFORMATEX beside it happens to say -- without this test an AAC track
+    // whose header block is a placeholder would be expanded as if it were PCM,
+    // which is full-scale noise rather than a silent failure.
+    this.simpleDecode = this.audioConfig && this.audioConfig.kind === 'codec'
+      ? null
+      : makeSimpleDecoder(this.audioConfig ? this.audioConfig.wfx || this.wfx : this.wfx)
     this.available = true
     return true
   }
@@ -114,25 +139,38 @@ export class AudioPipeline {
       this.onStatus('Audio disabled: this browser has no WebCodecs AudioDecoder.')
       return false
     }
-    const description = buildFlacDescription(this.header.audioExtradata)
-    if (!description) {
-      this.onStatus('Audio disabled: the FLAC stream header is missing.')
-      return false
+
+    const stated = this.audioConfig && this.audioConfig.kind === 'codec'
+      ? this.audioConfig.config
+      : null
+    const label = (this.audioConfig && this.audioConfig.label) || 'FLAC'
+
+    if (stated) {
+      this._decoderConfig = { ...stated }
+    } else {
+      // The BVR path: the only compressed audio Blue Iris writes is FLAC, and it
+      // stores a bare STREAMINFO where WebCodecs wants a whole stream header.
+      const description = buildFlacDescription(this.header.audioExtradata)
+      if (!description) {
+        this.onStatus('Audio disabled: the FLAC stream header is missing.')
+        return false
+      }
+      this._decoderConfig = {
+        codec: 'flac',
+        sampleRate: this.sampleRate,
+        numberOfChannels: this.channels,
+        description
+      }
     }
-    this._flacConfig = {
-      codec: 'flac',
-      sampleRate: this.sampleRate,
-      numberOfChannels: this.channels,
-      description
-    }
+
     try {
-      const support = await AudioDecoder.isConfigSupported(this._flacConfig)
+      const support = await AudioDecoder.isConfigSupported(this._decoderConfig)
       if (!support.supported) {
-        this.onStatus('Audio disabled: this browser cannot decode FLAC.')
+        this.onStatus(`Audio disabled: this browser cannot decode ${label}.`)
         return false
       }
     } catch {
-      this.onStatus('Audio disabled: this browser cannot decode FLAC.')
+      this.onStatus(`Audio disabled: this browser cannot decode ${label}.`)
       return false
     }
     this._openDecoder()
@@ -148,7 +186,7 @@ export class AudioPipeline {
         this.available = false
       }
     })
-    this.decoder.configure(this._flacConfig)
+    this.decoder.configure(this._decoderConfig)
   }
 
   _onAudioData (data) {
@@ -204,7 +242,7 @@ export class AudioPipeline {
     if (this.decoder && this.decoder.state === 'configured') {
       try {
         this.decoder.reset()
-        this.decoder.configure(this._flacConfig)
+        this.decoder.configure(this._decoderConfig)
       } catch { /* re-created on next use */ }
     }
   }

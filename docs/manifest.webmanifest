@@ -1,7 +1,7 @@
 {
   "name": "BVR Player",
   "short_name": "BVR Player",
-  "description": "Play Blue Iris .bvr recordings locally in the browser.",
+  "description": "Play Blue Iris .bvr recordings and MP4 video locally in the browser.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
@@ -22,7 +22,9 @@
       "action": "./",
       "accept": {
         "application/octet-stream": [".bvr"],
-        "video/x-blueiris-bvr": [".bvr"]
+        "video/x-blueiris-bvr": [".bvr"],
+        "video/mp4": [".mp4", ".m4v"],
+        "video/quicktime": [".mov"]
       },
       "icons": [
         { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png" }

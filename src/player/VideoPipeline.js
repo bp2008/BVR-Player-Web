@@ -83,7 +83,11 @@ export class VideoPipeline {
 
     this.buf = new Map()
     this.epoch = 1
-    this.feedIdx = 0
+    // Where the feed has got to, counted in *decode* steps rather than in frames
+    // of the sequence. The two are the same number on every stream whose frames
+    // decode in the order they are shown -- which is every BVR recording and most
+    // MP4s -- and differ only where B-frames are present. See `_seqAt`.
+    this.feedStep = 0
     this.runStart = -1
     this.anchorIdx = 0
     this.maxAhead = 24
@@ -179,6 +183,45 @@ export class VideoPipeline {
   }
 
   /**
+   * The frame a given decode step feeds.
+   *
+   * A sequence records its decode order as a permutation rather than reordering
+   * the frame table, because everything outside this feed loop -- the window, the
+   * anchor, the scrub bar, the frame counter, the binary search over `ts` --
+   * counts in presentation order and must keep doing so. `feedOrder` is absent
+   * on a sequence that decodes in presentation order, and then a step *is* a
+   * frame index and none of this costs anything.
+   */
+  _seqAt (step) {
+    const s = this.pstream
+    return s && s.feedOrder ? s.feedOrder[step] : step
+  }
+
+  /** The decode step at which a given frame is fed. */
+  _stepOf (idx) {
+    const s = this.pstream
+    return s && s.feedPos ? s.feedPos[idx] : idx
+  }
+
+  /**
+   * The highest decode step the feed may reach, given where the anchor is.
+   *
+   * Expressed in decode steps on purpose. A bound stated in presentation order
+   * deadlocks a reordered stream outright: the frame shown next may decode
+   * *after* one shown much later, so "stop feeding past anchor + N frames" can
+   * refuse to send the very chunk the decoder is waiting for. `feedHigh[i]` is
+   * the highest decode step among frames 0..i, so feeding every step up to it
+   * guarantees each of those frames has been handed over -- and it never runs
+   * further ahead than the stream's own reorder depth requires.
+   */
+  _feedLimit () {
+    const s = this.pstream
+    const want = this.anchorIdx + this._feedAhead()
+    if (!s || !s.feedHigh) return want
+    return s.feedHigh[clamp(want, 0, s.count - 1)]
+  }
+
+  /**
    * How far past the anchor chunks may be *fed*, as opposed to how many decoded
    * pictures are kept.
    *
@@ -229,8 +272,8 @@ export class VideoPipeline {
     if (!this._ready.size) return
     if (this._reorder >= MAX_REORDER) return
     // There is more of the stream to feed, and the allowance is what stopped us.
-    if (!this.pstream || this.feedIdx >= this.pstream.count) return
-    if (this.feedIdx <= this.anchorIdx + this._feedAhead()) return
+    if (!this.pstream || this.feedStep >= this.pstream.count) return
+    if (this.feedStep <= this._feedLimit()) return
     // The decoder has taken every chunk and no picture is on its way back, so
     // nothing is going to change without more input.
     if (this._queued() > 0 || this._pendingCopies > 0) return
@@ -246,7 +289,7 @@ export class VideoPipeline {
     // that is merely slow resets the clock rather than being fed more. The
     // player pumps this once an animation frame while it waits, so the second
     // reading is never far behind.
-    const mark = `${this.epoch}:${this.feedIdx}:${this.anchorIdx}:${this._outIdx}`
+    const mark = `${this.epoch}:${this.feedStep}:${this.anchorIdx}:${this._outIdx}`
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
     if (this._stallMark !== mark) { this._stallMark = mark; this._stallSince = now; return }
     if (now - this._stallSince < STALL_GRACE_MS) return
@@ -290,7 +333,7 @@ export class VideoPipeline {
     this._outIdx = -1
     this._stallMark = ''
     this.epoch++
-    this.feedIdx = 0
+    this.feedStep = 0
     this.runStart = -1
     this.anchorIdx = 0
     this._sizeWindow()
@@ -383,10 +426,14 @@ export class VideoPipeline {
 
     const k = Math.max(0, s.keyIdx[idx])
     // Continuing forward beats a decoder restart whenever we are already past
-    // the key frame that idx depends on.
+    // the key frame that idx depends on. Both comparisons are in decode steps:
+    // on a reordered stream the frame wanted and the key frame it depends on sit
+    // at steps that need not be in the same order as the frames themselves.
+    const step = this._stepOf(idx)
+    const keyStep = this._stepOf(k)
     const canContinue = this.kind !== 'video'
-      ? this.feedIdx <= idx
-      : this.configured && this.feedIdx <= idx && this.feedIdx > k
+      ? this.feedStep <= step
+      : this.configured && this.feedStep <= step && this.feedStep > keyStep
     if (!canContinue) this._restartAt(k)
     this._trim()
     this.pump()
@@ -413,7 +460,7 @@ export class VideoPipeline {
     this._ready.clear()
     this._feedSource = -1
     this.configured = true
-    this.feedIdx = k
+    this.feedStep = this._stepOf(k)
     this.runStart = k
     this._outIdx = -1
   }
@@ -434,15 +481,16 @@ export class VideoPipeline {
     if (!this.configured) this._restartAt(Math.max(0, s.keyIdx[this.anchorIdx]))
 
     while (!this.closed) {
-      if (this.feedIdx >= s.count) break
-      if (this.feedIdx > this.anchorIdx + this._feedAhead()) break
+      if (this.feedStep >= s.count) break
+      if (this.feedStep > this._feedLimit()) break
       // Bound the decoders' outstanding work: queued chunks plus pictures we
       // have not yet handed back must stay under the output pool size.
       if (this.kind === 'video') {
         if (this._queued() + this._pendingCopies >= 6) break
       } else if (this._inFlight >= 4) break
 
-      const idx = this.feedIdx
+      const step = this.feedStep
+      const idx = this._seqAt(step)
       const si = this.sourceOf(idx)
       const info = this._infoFor(idx)
       const isKey = !!(s.flags[idx] & FLAG_ISKEY)
@@ -464,7 +512,7 @@ export class VideoPipeline {
       // that has not begun yet, and feeding a decoder a delta frame it has no
       // reference for produces either an error or a corrupt picture.
       if (info && info.kind === 'video' && !this._ready.has(si) && !isKey) {
-        this.feedIdx = idx + 1
+        this.feedStep = step + 1
         continue
       }
 
@@ -479,7 +527,7 @@ export class VideoPipeline {
         break
       }
       // A seek may have landed while the read was in flight.
-      if (this.closed || epoch !== this.epoch || this.feedIdx !== idx) break
+      if (this.closed || epoch !== this.epoch || this.feedStep !== step) break
 
       const bytes = new Uint8Array(view.buffer, view.byteOffset, len)
       if (info && info.kind === 'video') {
@@ -503,7 +551,7 @@ export class VideoPipeline {
       } else {
         this._decodeImage(bytes.slice(), idx, epoch, info)
       }
-      this.feedIdx = idx + 1
+      this.feedStep = step + 1
     }
     this._maybeFlush()
     this._widenForReorder()
@@ -530,7 +578,7 @@ export class VideoPipeline {
    */
   _maybeFlush () {
     if (this.kind !== 'video' || !this.configured || this.closed) return
-    if (!this.pstream || this.feedIdx < this.pstream.count) return
+    if (!this.pstream || this.feedStep < this.pstream.count) return
     if (this._flushEpoch === this.epoch) return
     if (!this._ready.size) return
     this._flushEpoch = this.epoch

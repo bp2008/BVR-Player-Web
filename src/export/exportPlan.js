@@ -56,30 +56,55 @@ function audioRange (index, audioStarts, startMs, endMs) {
   return { from, to, count: Math.max(0, to - from + 1) }
 }
 
+/**
+ * Whether the source's audio can be moved into the output untouched.
+ *
+ * True only when it is already AAC, which in practice means the source is an
+ * MP4. It is worth the test rather than always re-encoding: a copy is lossless,
+ * it is far faster, and it is the only audio path at all in a browser with no
+ * `AudioEncoder`.
+ */
+function audioIsCopyable (header) {
+  const stated = header.audioConfig
+  if (!stated || stated.kind !== 'codec' || !stated.config) return false
+  if (!stated.config.description || !stated.config.description.length) return false
+  return /^mp4a\.40\./.test(stated.config.codec || '')
+}
+
 function describeAudio (header, index, audioStarts, options, range) {
-  const label = header.hasAudio ? audioCodecLabel(header.wfx) : ''
+  const stated = header.audioConfig
+  const label = header.hasAudio ? (stated && stated.label) || audioCodecLabel(header.wfx) : ''
   if (!header.hasAudio || !index.audio.count) {
     return { include: false, label: '', note: 'This recording has no audio track.' }
   }
   if (options.audio === AUDIO_NONE) {
     return { include: false, label, note: 'Audio will be left out.' }
   }
-  if (typeof AudioEncoder === 'undefined') {
+
+  const copy = audioIsCopyable(header)
+  if (!copy && typeof AudioEncoder === 'undefined') {
     return { include: false, label, note: 'Audio needs the WebCodecs AudioEncoder, which this browser does not have.' }
   }
+
   const tag = header.wfx.wFormatTag
-  const native = tag === WAVE_FORMAT_PCM ? 'PCM' : tag === WAVE_FORMAT_FLAC ? 'FLAC' : 'G.711 mu-law'
+  const native = stated
+    ? label
+    : tag === WAVE_FORMAT_PCM ? 'PCM' : tag === WAVE_FORMAT_FLAC ? 'FLAC' : 'G.711 mu-law'
   return {
     include: range.count > 0,
     label,
+    copy,
     packets: range.count,
     from: range.from,
     to: range.to,
-    // Every codec BVR can carry is one MP4 has no standard mapping for in
-    // practice, so audio is always re-encoded rather than copied.
-    note: range.count > 0
-      ? `${native} is re-encoded to AAC; MP4 has no practical container form for it.`
-      : 'No audio packets fall inside the selected range.'
+    // Nothing BVR can carry has a container form MP4 players can be relied on to
+    // handle, so a BVR export always re-encodes. An MP4 source that is already
+    // AAC is simply moved across.
+    note: range.count === 0
+      ? 'No audio packets fall inside the selected range.'
+      : copy
+        ? 'AAC is copied across without re-encoding.'
+        : `${native} is re-encoded to AAC; MP4 has no practical container form for it.`
   }
 }
 
@@ -158,9 +183,14 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
   // Playback hands over the table it already built; without it -- audio that
   // never started, or a caller outside the player -- rebuild it here, since the
   // stored per-packet timestamps are not start times (spec 6).
-  const starts = audioStarts || packetStartTimes(header.wfx, index.audio, header.audioExtradata)
+  const starts = audioStarts || index.audio.starts ||
+    packetStartTimes(header.wfx, index.audio, header.audioExtradata)
   const audio = describeAudio(header, index, starts, opts, audioRange(index, starts, startMs, endMs))
-  if (audio.include && audio.note) warnings.push(audio.note)
+  // The note only rises to a warning when it is telling the user about something
+  // they might not want: a re-encode, or audio being left out. Audio that copies
+  // across untouched is the good outcome and says so in the plan, not in a
+  // warning list beside the genuine caveats.
+  if (audio.include && audio.note && !audio.copy) warnings.push(audio.note)
   else if (!audio.include && audio.note && header.hasAudio && opts.audio !== AUDIO_NONE) warnings.push(audio.note)
 
   let videoBytes = 0

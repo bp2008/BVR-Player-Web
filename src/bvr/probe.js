@@ -74,7 +74,15 @@ export async function findFirstKeys (reader, header) {
   return { keys, seen }
 }
 
-async function checkSupport (codec) {
+/**
+ * Whether this device can decode what a codec description names.
+ *
+ * Exported because the MP4 layer reaches the same question from the other
+ * direction -- it reads the codec out of a sample entry rather than out of a key
+ * frame -- and the verdict, and the wording of a refusal, should not depend on
+ * which container asked.
+ */
+export async function checkCodecSupport (codec) {
   if (codec.kind === 'image') return { supported: true, reason: '' }
   if (codec.kind === 'unsupported') {
     return { supported: false, reason: `${codec.label} is not a format browsers can decode.` }
@@ -99,7 +107,7 @@ async function describeStream (reader, header, si, key) {
   let keyBytes = null
   if (key) keyBytes = await reader.readCopy(key.offset, Math.min(key.size, KEY_SAMPLE))
   const codec = describeVideoCodec(bmih?.fourcc || '', keyBytes, bmih)
-  const { supported, reason } = await checkSupport(codec)
+  const { supported, reason } = await checkCodecSupport(codec)
   return {
     name: STREAM_NAMES[si],
     present: true,

@@ -47,8 +47,11 @@ export const SIGNATURE = 0x45554c42
 
 export const FRAME_HEADER_SIZE = 16
 
-// wfx.wFormatTag values we understand (spec section 4.2).
+// wfx.wFormatTag values we understand (spec section 4.2). A-law never appears in
+// a BVR file; it is here because an MP4 audio track may carry it, and describing
+// it with the same tag keeps one audio path rather than two.
 export const WAVE_FORMAT_PCM = 1
+export const WAVE_FORMAT_ALAW = 6
 export const WAVE_FORMAT_MULAW = 7
 export const WAVE_FORMAT_FLAC = 0xf1ac
 

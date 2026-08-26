@@ -2,7 +2,7 @@ import { BlobReader } from '../bvr/blobReader.js'
 import { buildFlacDescription, makeSimpleDecoder, packetStartTimes } from '../player/audioCodecs.js'
 import { Mp4Muxer } from './mp4Muxer.js'
 import {
-  ParameterSets, annexBToLengthPrefixed, buildDecoderConfig, sampleEntryFor
+  ParameterSets, annexBToLengthPrefixed, buildDecoderConfig, sampleEntryFor, isLengthPrefixed
 } from './bitstream.js'
 import { MODE_REMUX, TRANSCODE_CODECS, VIDEO_TIMESCALE } from './exportPlan.js'
 
@@ -73,7 +73,9 @@ export class ExportJob {
   async run () {
     const plan = this.plan
     try {
-      const audio = plan.audio.include ? await this._encodeAudio() : null
+      const audio = plan.audio.include
+        ? (plan.audio.copy ? await this._copyAudio() : await this._encodeAudio())
+        : null
       this._check()
 
       const mux = new Mp4Muxer({ sink: this.sink })
@@ -92,7 +94,7 @@ export class ExportJob {
         pasp: plan.pasp,
         timescale: VIDEO_TIMESCALE,
         config: null,
-        name: plan.mode === MODE_REMUX ? 'BVR stream copy' : 'BVR re-encode'
+        name: plan.mode === MODE_REMUX ? 'stream copy' : 're-encode'
       })
       const audioTrack = audio
         ? mux.addAudioTrack({
@@ -203,10 +205,69 @@ export class ExportJob {
     }
   }
 
+  /**
+   * Copies the source's audio packets rather than re-encoding them.
+   *
+   * Only reachable from an MP4 source, and only when its audio is already AAC --
+   * which is to say, when the source track and the output track are the same
+   * format and the samples can simply be moved. It is both faster than a
+   * re-encode and lossless, and it is the only audio path that works at all in a
+   * browser with no `AudioEncoder`.
+   *
+   * The packets are read up front and held, exactly as the encoding path holds
+   * its output, because the muxer interleaves them into the video stream as it
+   * goes and cannot go back for them.
+   */
+  async _copyAudio () {
+    const plan = this.plan
+    const a = this.index.audio
+    const stated = this.header.audioConfig
+    try {
+      const description = stated && stated.config ? stated.config.description : null
+      if (!description) throw new Error('the source audio has no decoder configuration to carry over.')
+
+      const sampleRate = stated.config.sampleRate
+      const channels = Math.max(1, Math.min(2, stated.config.numberOfChannels || 1))
+      const from = plan.audio.from
+      const to = plan.audio.to
+      const total = Math.max(1, to - from + 1)
+      const originMs = this._audioStartMs(from)
+
+      const chunks = []
+      let bytes = 0
+      for (let i = from; i <= to; i++) {
+        this._check()
+        if (bytes > AUDIO_MEMORY_LIMIT) {
+          this.warnings.push('The audio track grew past the memory budget for an export and was dropped.')
+          return null
+        }
+        const data = await this.reader.readCopy(a.offset[i], a.size[i])
+        bytes += data.length
+        const startMs = this._audioStartMs(i) - originMs
+        const nextMs = i < to ? this._audioStartMs(i + 1) - originMs : startMs
+        chunks.push({
+          timestamp: Math.round(startMs * 1000),
+          duration: i < to ? Math.round((nextMs - startMs) * 1000) : 0,
+          data
+        })
+        if ((i - from) % 64 === 0) this._report('audio', i - from, total)
+      }
+      if (!chunks.length) return null
+      this._report('audio', total, total)
+      return { chunks, description, sampleRate, channels, bytes }
+    } catch (e) {
+      this.warnings.push(`Audio was left out: ${e && e.message ? e.message : e}`)
+      return null
+    }
+  }
+
   /** Reconstructs a packet's start time the way playback does (spec 6). */
   _audioStartMs (i) {
     if (!this._audioStarts) {
-      this._audioStarts = packetStartTimes(this.header.wfx, this.index.audio, this.header.audioExtradata) ||
+      // An MP4 states its packet start times; a BVR file has to have them
+      // reconstructed, because what it stores is not a start time (spec 6).
+      this._audioStarts = this.index.audio.starts ||
+        packetStartTimes(this.header.wfx, this.index.audio, this.header.audioExtradata) ||
         Float64Array.from(this.index.audio.ts)
     }
     return this._audioStarts[i] || 0
@@ -320,20 +381,36 @@ export class ExportJob {
   async _runRemux (mux, videoTrack, audioTrack, audio) {
     const plan = this.plan
     const s = this.pstream
-    const isH264 = plan.fourcc === 'H264'
+    // An MP4 source is already storing exactly what an MP4 sample is, so its
+    // frames are moved rather than converted and its parameter sets are taken
+    // from the sample entry instead of being gathered out of the bitstream.
+    const copyBytes = isLengthPrefixed(plan.fourcc)
+    const isH264 = plan.fourcc === 'H264' || plan.fourcc === 'avc1' || plan.fourcc === 'avc3'
     const params = new ParameterSets(isH264)
     if (audio) audio.cursor = 0
 
-    const base = s.ts[plan.startIdx]
-    const total = plan.frames
+    // The order the frames are written in, and the clock they are timed against.
+    //
+    // Normally these are the same thing: frames are shown in the order they
+    // decode, so copying them in that order with the gaps between their
+    // presentation times as durations is the whole job. A source with B-frames
+    // has two orders and two clocks, and both have to survive the copy -- the
+    // samples go out in *decode* order, timed by their decode timestamps, and
+    // each one's presentation time rides along so the muxer can write the
+    // composition offsets back out. Getting this wrong produces a file that
+    // plays its frames jumbled, which is why it is not left to chance.
+    const order = this._remuxOrder()
+    const base = order.baseMs
+    const total = order.steps.length
     let written = 0
     let dropped = 0
     let nextInterleave = INTERLEAVE_MS
     mux.beginChunk(videoTrack)
 
-    for (let i = plan.startIdx; i <= plan.endIdx; i++) {
+    for (let n = 0; n < order.steps.length; n++) {
       this._check()
-      const relMs = s.ts[i] - base
+      const i = order.steps[n]
+      const relMs = order.timeOf(i) - base
       if (relMs >= nextInterleave) {
         mux.endChunk(videoTrack)
         await this._drainAudio(mux, audioTrack, audio, relMs)
@@ -343,17 +420,25 @@ export class ExportJob {
 
       const view = await this.reader.read(s.offset[i], s.size[i])
       const payload = new Uint8Array(view.buffer, view.byteOffset, s.size[i])
-      const sample = annexBToLengthPrefixed(payload, isH264, params)
+      // The read window is reused by the next read, so a copy is needed either
+      // way; the converter makes one, and the passthrough has to make its own.
+      const sample = copyBytes
+        ? payload.slice()
+        : annexBToLengthPrefixed(payload, isH264, params)
       if (!sample) { dropped++; continue }
 
-      const nextMs = i < plan.endIdx ? s.ts[i + 1] - base : relMs + this._tailDuration()
+      const next = order.steps[n + 1]
+      const nextMs = next !== undefined ? order.timeOf(next) - base : relMs + this._tailDuration()
       await mux.writeSample(videoTrack, sample, {
         duration: (nextMs - relMs) * (VIDEO_TIMESCALE / 1000),
-        isKey: !!(s.flags[i] & 0x0001)
+        isKey: !!(s.flags[i] & 0x0001),
+        // Only supplied where it differs from the decode time; the muxer writes
+        // no `ctts` at all when every offset comes out zero.
+        pts: order.reordered ? (s.ts[i] - base) * (VIDEO_TIMESCALE / 1000) : null
       })
       written++
       if ((written & 63) === 0) {
-        this._report('video', i - plan.startIdx, total)
+        this._report('video', n, total)
         // The read-ahead makes most iterations synchronous; without a real turn
         // of the event loop the progress bar would never paint.
         await nextTurn()
@@ -362,8 +447,10 @@ export class ExportJob {
     mux.endChunk(videoTrack)
     await this._drainAudio(mux, audioTrack, audio, Infinity)
 
-    videoTrack.config = buildDecoderConfig(plan.fourcc, params)
-    if (params.conflict) {
+    videoTrack.config = copyBytes
+      ? this._sourceDecoderConfig()
+      : buildDecoderConfig(plan.fourcc, params)
+    if (!copyBytes && params.conflict) {
       this.warnings.push(
         'The recording redefines a parameter set mid-stream. Only the first ' +
         'definition could be carried in the MP4 header; re-encode if the result ' +
@@ -373,6 +460,62 @@ export class ExportJob {
     if (dropped) this.warnings.push(`${dropped} frame(s) held no decodable data and were skipped.`)
     this._report('video', total, total)
     return { frames: written, mode: MODE_REMUX }
+  }
+
+  /**
+   * Which frames a stream copy writes, in which order, and against which clock.
+   *
+   * On an ordinary stream this is just the planned range walked forwards, timed
+   * by presentation. On a reordered one it is the *decode*-order run that covers
+   * that range: starting at the key frame the plan already snapped to, and
+   * ending at the last decode step any frame in the range occupies. That run is
+   * contiguous by construction -- a frame cannot decode before the key frame it
+   * depends on -- and it may reach a little past the requested end, because a
+   * frame shown inside the range can depend on one decoded after it. Copying a
+   * frame too many is harmless; omitting one it referenced is not.
+   */
+  _remuxOrder () {
+    const s = this.pstream
+    const plan = this.plan
+    const lo = plan.startIdx
+    const hi = Math.min(plan.endIdx, s.count - 1)
+
+    if (!s.feedOrder || !s.dts) {
+      const steps = []
+      for (let i = lo; i <= hi; i++) steps.push(i)
+      return {
+        steps,
+        reordered: false,
+        baseMs: s.ts[lo] || 0,
+        timeOf: (i) => s.ts[i]
+      }
+    }
+
+    let stepHi = s.feedPos[lo]
+    for (let i = lo; i <= hi; i++) if (s.feedPos[i] > stepHi) stepHi = s.feedPos[i]
+    const stepLo = s.feedPos[lo]
+
+    const steps = []
+    for (let step = stepLo; step <= stepHi; step++) steps.push(s.feedOrder[step])
+    return {
+      steps,
+      reordered: true,
+      baseMs: s.dts[s.feedOrder[stepLo]],
+      timeOf: (i) => s.dts[i]
+    }
+  }
+
+  /**
+   * The `avcC`/`hvcC` an MP4 source already carries, for a copy that has no
+   * bitstream to collect parameter sets from.
+   */
+  _sourceDecoderConfig () {
+    const configs = this.plan.decoderConfigs
+    const si = this.pstream.codecSource
+    const config = configs && (configs[si] || configs.find(Boolean))
+    const d = config && config.description
+    if (!d) return null
+    return d instanceof Uint8Array ? d : new Uint8Array(d)
   }
 
   _tailDuration () {
