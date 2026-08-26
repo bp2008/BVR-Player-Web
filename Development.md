@@ -116,9 +116,12 @@ the incoming one begins and the picture never freezes across a switch.
 **Main** and **Sub** still play exactly the stream named. Where that stream has
 nothing — before its first frame, or across a hole — playback skips forward to
 the next picture that exists rather than sitting on a still frame while the audio
-runs on. The timeline is the recording's either way, not the selected stream's:
-a file whose main stream covers twenty minutes of an hour is still an hour long,
-and both the audio and the other stream are still there to be reached.
+runs on. Past its *last* picture there is nothing to skip to, so the clip is over:
+the playhead jumps to the end and playback stops, or loops, as it would at the end
+of any other file. Either way it is the recording that ends, not the stream — the
+timeline is the recording's throughout, not the selected stream's, so a file whose
+main stream covers twenty minutes of an hour is still an hour long, and both the
+audio and the other stream are still there to be reached.
 
 Where the two streams differ, the scrub bar says so. Stretches with main-stream
 video are drawn light, stretches with only the sub stream are the plain rail, and

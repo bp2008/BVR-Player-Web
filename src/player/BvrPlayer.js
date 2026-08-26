@@ -539,6 +539,36 @@ export class BvrPlayer {
     return true
   }
 
+  /**
+   * Whether the sequence being played has nothing left to show.
+   *
+   * The recording ends where the recording ends, which on a stream that stops
+   * early is well past its own last picture. Running the clock out to there
+   * left the last frame frozen on screen while the audio played on, which reads
+   * as a decoder that has given up rather than as a stream that has finished --
+   * so once that frame has had its time on screen, playback is over.
+   *
+   * The wait matches `_skipEmptyStretch`: half the gap threshold, which is at
+   * least half a second and by construction longer than the stream's own frame
+   * spacing, so a stream that simply runs to the end of the recording reaches
+   * `duration` first and ends there instead.
+   */
+  _outOfPictures () {
+    const s = this.pstream
+    if (!s || s.count === 0) return false
+    const last = s.count - 1
+    if (this.curIdx < last) return false
+    return this.clock.currentTime - s.ts[last] > this._gapAfter(last) / 2
+  }
+
+  /** Parks the playhead at the end of the recording and reports the stop. */
+  _finish () {
+    this.clock.currentTime = this.duration
+    this.pause()
+    this.ended = true
+    this._emit({ ended: true, currentTime: this.clock.currentTime })
+  }
+
   async _probeMissedStreams () {
     let changed = false
     for (let si = 0; si < 2; si++) {
@@ -1098,15 +1128,7 @@ export class BvrPlayer {
           if (!this._state.buffering) this._emit({ buffering: true })
         }
       }
-      // The recording ends where the recording ends, which on a stream that
-      // stops early is past its own last frame; the picture stays up while the
-      // rest of the audio plays out.
-      if (t >= this.duration) {
-        this.clock.currentTime = this.duration
-        this.pause()
-        this.ended = true
-        this._emit({ ended: true, currentTime: this.clock.currentTime })
-      }
+      if (t >= this.duration || this._outOfPictures()) this._finish()
     }
 
     this.video.pump()
