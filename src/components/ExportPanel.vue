@@ -70,13 +70,27 @@
 
       <div class="export__field">
         <span class="export__label">Method</span>
-        <label class="export__radio">
-          <input type="radio" value="remux" :checked="options.mode === 'remux'" :disabled="!plan.copyable" @change="patch({ mode: 'remux' })" />
-          <span>
-            Copy frames
-            <em>{{ plan.copyable ? 'Fast, no quality loss' : plan.copyBlocker }}</em>
-          </span>
-        </label>
+        <div class="export__method">
+          <label class="export__radio">
+            <input type="radio" value="remux" :checked="options.mode === 'remux'" :disabled="!plan.copyable" @change="patch({ mode: 'remux' })" />
+            <span>
+              Copy frames
+              <em>{{ plan.copyable ? 'Fast, no quality loss' : plan.copyBlocker }}</em>
+            </span>
+          </label>
+          <button
+            v-if="!plan.copyable"
+            type="button"
+            class="export__why"
+            :aria-expanded="copyHelp ? 'true' : 'false'"
+            aria-label="What lets frames be copied?"
+            title="What lets frames be copied?"
+            @click="copyHelp = !copyHelp"
+          >?</button>
+        </div>
+        <ul v-if="copyHelp && !plan.copyable" class="export__help">
+          <li v-for="(n, i) in copyHelpNotes" :key="i">{{ n }}</li>
+        </ul>
         <label class="export__radio">
           <input type="radio" value="transcode" :checked="options.mode === 'transcode'" :disabled="noEncoder" @change="patch({ mode: 'transcode' })" />
           <span>
@@ -247,7 +261,9 @@ export default {
       encoderCheck: { key: '', blocked: false, alt: 0 },
       // Set when the method was moved off "copy" because the chosen source
       // could not be copied, so that picking a source that can be restores it.
-      forcedTranscode: false
+      forcedTranscode: false,
+      // Whether the `?` beside a blocked "copy frames" is showing its answer.
+      copyHelp: false
     }
   },
   computed: {
@@ -271,6 +287,37 @@ export default {
       if (info[STREAM_SUB]) out.push({ value: SOURCE_SUB, label: info[STREAM_SUB].label + shape(info[STREAM_SUB]) })
       if (info[STREAM_MAIN] && info[STREAM_SUB]) out.push({ value: SOURCE_BOTH, label: 'Both (main preferred)' })
       return out
+    },
+    /**
+     * What a copy actually needs, for the `?` beside a blocked "copy frames".
+     *
+     * `plan.copyBlocker` is one clause because that is the room the radio has,
+     * and a clause can only say what is wrong with *this* file. This is the rule
+     * behind it, which is what someone opens the `?` to find out: the question a
+     * refusal raises is not why this file was refused but which files are not,
+     * and for Both the honest answer -- the ones whose sequence never has to
+     * switch -- is more than a clause can hold.
+     */
+    copyHelpNotes () {
+      const notes = [
+        'Copying moves the recorded frames into the MP4 untouched, so they have to ' +
+        'already be something an MP4 track carries: H.264 or H.265. MJPEG has no ' +
+        'MP4 form and can only be re-encoded.'
+      ]
+      if (this.sourceOptions.length > 1) {
+        notes.push(
+          'Both is still one track, and one track holds one codec at one picture ' +
+          'size. So it copies only where the sequence never switches: either the ' +
+          'better stream already covers the whole recording and Both collapses to ' +
+          'it, or the two streams agree on codec and size. Where they do switch — ' +
+          'a smaller sub stream filling the gaps in the main one — it re-encodes.'
+        )
+        notes.push(
+          'Main or Sub on its own is a single stream, so it copies whenever its own ' +
+          'codec has an MP4 form.'
+        )
+      }
+      return notes
     },
     sourceHint () {
       if (this.options.source !== SOURCE_BOTH) return ''
@@ -686,6 +733,63 @@ export default {
   display: flex;
   align-items: center;
   gap: 5px;
+}
+
+/* The radio and the `?` that explains why it is disabled, on one line. The
+   button sits outside the label so that neither the label's dimming of a
+   disabled control nor its click forwarding reaches it. */
+.export__method {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.export__method .export__radio {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.export__why {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  padding: 0;
+  border: 1px solid var(--field-border);
+  border-radius: 50%;
+  background: var(--field);
+  color: var(--text-dim);
+  font: 600 11px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.export__why:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.export__why:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.export__why[aria-expanded='true'] {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.export__help {
+  margin: 0;
+  padding: 8px 11px 8px 26px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.export__help li + li {
+  margin-top: 6px;
 }
 
 .export__radio {

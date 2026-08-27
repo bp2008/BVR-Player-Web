@@ -264,6 +264,22 @@ function describeAudio (header, index, audioStarts, options, range) {
 }
 
 /**
+ * How a merged sequence's two streams fail to agree, as a clause.
+ *
+ * Both properties can be true at once, and a message that mentions one of them
+ * describes the file wrongly: it says the copy would work if that one were
+ * fixed. Empty for a single-stream sequence, which agrees with itself.
+ */
+function streamMismatch (pstream) {
+  if (pstream.mixedCodecs && pstream.variableResolution) {
+    return 'the two streams differ in both codec and size'
+  }
+  if (pstream.mixedCodecs) return 'the two streams use different codecs'
+  if (pstream.variableResolution) return 'the two streams are different sizes'
+  return ''
+}
+
+/**
  * A remux copies compressed frames untouched, so it can only begin where the
  * decoder can: at a key frame at or before the requested start.
  */
@@ -299,34 +315,29 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
 
   const fourcc = pstream.fourcc || ''
   const copyable = canRemux(fourcc) && !pstream.variableResolution && !pstream.mixedCodecs
-  // Why not, in the few words the dialog has room for. The long-form version is
-  // in `warnings`, but that only appears once a copy has actually been asked
-  // for and refused -- this is what the disabled radio says about itself.
+  // Why not, in the few words the dialog has room for, and every reason at once
+  // rather than the first one found: naming only the codec mismatch reads as a
+  // promise that matching codecs would copy, when a size mismatch would still
+  // refuse. The long-form version is in `warnings`, but that only appears once a
+  // copy has actually been asked for and refused -- this is what the disabled
+  // radio says about itself.
   const copyBlocker = copyable
     ? ''
-    : !canRemux(fourcc)
-      ? `${fourcc || 'This codec'} has no MP4 form`
-      : pstream.mixedCodecs
-        ? 'The two streams use different codecs'
-        : 'The two streams are different sizes'
+    : [
+        canRemux(fourcc) ? '' : `${fourcc || 'this codec'} has no MP4 form`,
+        streamMismatch(pstream)
+      ].filter(Boolean).join(', and ').replace(/^./, (c) => c.toUpperCase())
   let mode = opts.mode
 
   if (mode === MODE_REMUX && !canRemux(fourcc)) {
     mode = MODE_TRANSCODE
     warnings.push(`${fourcc || 'This codec'} has no usable MP4 form, so the export re-encodes.`)
-  } else if (mode === MODE_REMUX && pstream.mixedCodecs) {
+  } else if (mode === MODE_REMUX && (pstream.mixedCodecs || pstream.variableResolution)) {
     mode = MODE_TRANSCODE
     warnings.push(
-      'This recording switches between two streams with different codecs, and an ' +
-      'MP4 track holds one. Pick the main or sub stream on its own to copy frames ' +
-      'without re-encoding.'
-    )
-  } else if (mode === MODE_REMUX && pstream.variableResolution) {
-    mode = MODE_TRANSCODE
-    warnings.push(
-      'This is a switching-mode recording: the picture changes size mid-stream, ' +
-      'which MP4 tolerates poorly. Pick the main or sub stream on its own to copy ' +
-      'frames without re-encoding.'
+      `This is a switching-mode recording: ${streamMismatch(pstream)}. One MP4 ` +
+      'track holds one codec at one size, so the export re-encodes. Pick the main ' +
+      'or sub stream on its own to copy frames instead.'
     )
   }
 

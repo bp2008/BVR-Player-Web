@@ -157,9 +157,12 @@ the main stream is the sparser of the two, so a recording whose *sub* stream
 dropped out reads correctly the other way round. On the ordinary recording whose
 streams cover the same hour, the banding is not drawn at all.
 
-An `auto` sequence built from two streams cannot be copied into an MP4 — one
-track holds one codec, and one resolution — so exporting it re-encodes, and the
-export panel says to pick main or sub on its own to copy frames instead.
+An `auto` sequence that really is built from two streams cannot be copied into
+an MP4 — one track holds one codec, and one resolution — so exporting it
+re-encodes, and the export panel says to pick main or sub on its own to copy
+frames instead. An `auto` sequence that *collapsed* to a single stream, which is
+what happens whenever the better stream already covers the whole recording, is
+one stream like any other and copies.
 
 ### Streams of the wrong shape
 
@@ -539,12 +542,22 @@ ways:
 - **Re-encode** — decode and encode again, which trims exactly and can change
   codec, bitrate, resolution and frame rate.
 
-A stream copy is refused for a sequence built from both streams, and the panel
-explains why: one MP4 track holds one codec and one resolution, and a switching
-sequence offers neither. The user is pointed at the single-stream selection
-instead. A re-encode handles it either way, running a decoder per source stream
-into one encoder and draining each before the other takes over, so the output
-follows exactly the sequence that was on screen.
+A stream copy is refused for a sequence that genuinely switches between the two
+streams, and the panel explains why: one MP4 track holds one codec and one
+resolution, and a switching sequence offers neither. The user is pointed at the
+single-stream selection instead. A re-encode handles it either way, running a
+decoder per source stream into one encoder and draining each before the other
+takes over, so the output follows exactly the sequence that was on screen.
+
+**Video source: Both** is not refused on principle, though, and saying so is the
+job of the `?` beside the disabled option. Both copies whenever the sequence it
+builds never has to switch — either because the better stream already covers the
+whole recording, so `auto` collapses to that stream alone (the common case), or
+because the two streams happen to share a codec and a picture size. The reason
+on the radio itself names *every* thing that is wrong with the file rather than
+the first one found, since "the two streams use different codecs" on its own
+reads as a promise that matching codecs would be enough when a size mismatch
+would still refuse.
 
 The range is set by dragging the handles on the scrub bar, by the **start here**
 and **end here** buttons, or by typing either timestamp into the panel. The
