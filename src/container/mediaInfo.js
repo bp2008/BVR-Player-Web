@@ -35,6 +35,10 @@
  *                    it is derived from `wfx` and `audioExtradata` instead.
  *   aoi, mask        Blue Iris motion-detection geometry. `[null, null]` and
  *                    null respectively on MP4.
+ *   writerVersion    the Blue Iris build that wrote the file, packed one
+ *                    component per byte (0x06010211 = 6.1.2.17). 0 where it is
+ *                    not recorded: a BVR written before Blue Iris 6.1.0.7, or
+ *                    any MP4.
  *   firstFrameOffset where frame data begins. Meaningless for MP4 (0).
  *   mp4              container detail for the inspector. Absent on BVR.
  *

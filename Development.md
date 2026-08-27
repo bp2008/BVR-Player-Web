@@ -456,9 +456,9 @@ first bytes rather than its name, so a recording that arrived with the wrong
 extension still opens.
 
 The things an MP4 cannot offer are the Blue Iris ones: overlay metadata, marks,
-segment starts, per-frame camera state and digital inputs, motion masks and areas
-of interest are all written by Blue Iris into the BVR container and have no MP4
-equivalent. The inspector says so in those places rather than showing empty
+segment starts, per-frame camera state and digital inputs, motion masks, areas of
+interest and the writer version are all written by Blue Iris into the BVR
+container and have no MP4 equivalent. The inspector says so in those places rather than showing empty
 sections, and it gains an **MP4 structure** section instead — brands, timescale,
 whether the index is a `moov` sample table or a run of fragments, and a line per
 track.
@@ -494,8 +494,9 @@ BVR carries more than pictures: overlay text and clocks, motion and AI bounding
 boxes, GPS, per-frame camera state and DIO inputs, marks, and the camera's motion
 mask. The **metadata** button opens an inspector over three tabs — the file as a
 whole (including the codec, resolution and frame count of whatever is playing,
-the recording window, the AOI, and the motion-mask geometry with a rendered
-grid), the current frame, and a timeline of marks and recording-segment starts
+the recording window, the Blue Iris build that wrote the file, the AOI, and the
+motion-mask geometry with a rendered grid), the current frame, and a timeline of
+marks and recording-segment starts
 that seeks on click. Overlays can also be drawn back over the video, where they
 stay registered with the picture under rotation, flip and zoom.
 

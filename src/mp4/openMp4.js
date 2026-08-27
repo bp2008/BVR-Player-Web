@@ -353,6 +353,7 @@ export async function openMp4 (reader, { onProgress, shouldStop } = {}) {
     // need no container test of their own.
     aoi: [null, null],
     mask: null,
+    writerVersion: 0,
     firstFrameOffset: 0,
     // Everything the inspector shows about the container itself.
     mp4: {

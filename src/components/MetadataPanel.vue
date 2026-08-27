@@ -23,6 +23,13 @@
           <div><dt>Duration</dt><dd>{{ formatTime(state.duration, false) }}</dd></div>
           <div v-if="orientation"><dt>Orientation</dt><dd>{{ orientation }}</dd></div>
           <div><dt>Container</dt><dd>{{ containerName }}</dd></div>
+          <div v-if="writer">
+            <dt>Written by</dt>
+            <dd>
+              {{ writer.text }}
+              <em v-if="writer.aside" class="kv__aside">{{ writer.aside }}</em>
+            </dd>
+          </div>
           <div v-if="state.truncated"><dt>Tail</dt><dd class="kv--warn">truncated</dd></div>
           <div v-if="state.resyncs"><dt>Resynchronised</dt><dd class="kv--warn">{{ state.resyncs }}x</dd></div>
         </dl>
@@ -233,6 +240,7 @@ import {
   MASK_FLAG_NAMES, STATE_BIT_NAMES
 } from '../bvr/constants.js'
 import { colorRefToCss, OBJ_GRAPHIC, OBJ_SHAPES, OBJ_TEXT } from '../bvr/metadata.js'
+import { writerVersionText } from '../bvr/parseFileHeader.js'
 import { containerLabel, hasBlueIrisExtras, streamNames } from '../container/mediaInfo.js'
 
 const LIST_LIMIT = 120
@@ -279,6 +287,20 @@ export default {
      * every frame of every file is worse than no row.
      */
     hasCameraState () { return hasBlueIrisExtras(this.header) },
+    /**
+     * The Blue Iris build that wrote the file (spec 2.2), or null where the
+     * question does not apply -- an MP4 was not written by Blue Iris at all.
+     *
+     * A BVR from before 6.1.0.7 stores 0, and that still gets a row: "no version
+     * recorded" is a fact about the file, and dropping the row would leave a
+     * viewer wondering whether the player simply failed to read it.
+     */
+    writer () {
+      if (!hasBlueIrisExtras(this.header)) return null
+      const text = writerVersionText(this.header.writerVersion)
+      if (text) return { text: `Blue Iris ${text}`, aside: '' }
+      return { text: 'not recorded', aside: 'written before Blue Iris 6.1.0.7' }
+    },
     /**
      * Whether the file stores its frames out of the order they are shown.
      *

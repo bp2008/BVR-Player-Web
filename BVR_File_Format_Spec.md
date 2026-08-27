@@ -63,9 +63,19 @@ Modern Blue Iris writes `postbytes = 16` on every frame. The 16 extension bytes 
 |---|---|---|---|---|
 | 16 | 8 | `ULONGLONG` | `utc` | Absolute wall-clock time: `time_t * 1000 + milliseconds` (i.e. Unix epoch milliseconds, UTC). |
 | 24 | 4 | `DWORD` | `dio_inputs` | Bitmask of global digital I/O input states at the time of the frame. |
-| 28 | 4 | `DWORD` / `float` | `state_bits` **or** `audio_power` | Union. For **video** frames: camera state bits (see §2.2). For **audio** frames: a `float` in `[0.0, 1.0]` giving the peak audio level of the packet (§6). |
+| 28 | 4 | `DWORD` / `float` | `version` **or** `state_bits` **or** `audio_power` | Union, interpreted by frame type. **Header** frame: writer version (§2.2). **Video** frames: camera state bits (§2.3). **Audio** frames: a `float` in `[0.0, 1.0]` giving the peak audio level of the packet (§6). |
 
-### 2.2 `state_bits` (video frames)
+### 2.2 `version` (header frame)
+
+On the header frame this field holds the version of Blue Iris that created the file, packed one component per byte, most significant first:
+
+```
+0xMMmmppbb   →   MM.mm.pp.bb      e.g. 0x06010211 = 6.1.2.17
+```
+
+A value of `0` means the file was written by a version that predates this field (Blue Iris < 6.1.0.7); readers MUST treat `0` as "unknown", not as version 0. Readers SHOULD NOT gate parsing on this value — the format is identified by structure, not version — but it is useful for diagnostics and for handling any future version-specific quirks. Writers other than Blue Iris SHOULD write `0` here rather than impersonating a Blue Iris version.
+
+### 2.3 `state_bits` (video frames)
 
 | Bit | Mask | Name | Meaning |
 |---|---|---|---|
@@ -76,7 +86,7 @@ Modern Blue Iris writes `postbytes = 16` on every frame. The 16 extension bytes 
 
 Other bits are reserved and currently zero. These are a per-frame snapshot of camera state; their only consumer is overlay rendering, where an object's `stateflags` (§7.1) holds the matching **"Require …"** options from the overlay editor — *Require live display of overlay at the time of recording*, *Require triggered*, *Require alerted*, *Require recording* — and the object is drawn only when every required bit is set on the current frame. A video-only player can ignore the field.
 
-### 2.3 Handling other `postbytes` values
+### 2.4 Handling other `postbytes` values
 
 Readers MUST use `postbytes` to locate the payload and MUST NOT assume it is 16:
 
@@ -131,7 +141,7 @@ The file MUST begin with a frame whose signature is `BLUE`. Its fields are inter
 | Field | Meaning in header frame |
 |---|---|
 | `flags` | `SUBSTREAM` bit → a second `BITMAPINFOHEADER` (sub stream) follows the main one. `MAINAVAILABLE` + `SUBSTREAM` → switching-mode dual-stream file (§5.3). Bits 8–10 → rotation/flip (§3.1). `ISHEADER` is always set. |
-| `postbytes` | Always 16 in files written by Blue Iris. The `utc` post-byte is the **recording start time**: the UTC of the first queued video frame, or wall-clock time at file creation if none was queued. The reference reader ignores it and takes the start from the first video frame; the two normally agree within a frame interval. `dio_inputs`/`state_bits` are zero. |
+| `postbytes` | Always 16 in files written by Blue Iris. The `utc` post-byte is the **recording start time**: the UTC of the first queued video frame, or wall-clock time at file creation if none was queued. The reference reader ignores it and takes the start from the first video frame; the two normally agree within a frame interval. `dio_inputs` is zero; the final `DWORD` is the writer `version` (§2.2). |
 | `timestamp` | Nominal frame **interval in microseconds**. Nominal FPS = `1,000,000 / timestamp`. Informational only; real frame timing comes from per-frame timestamps. |
 | `datasize` | Length of the configuration payload described below. |
 
@@ -218,7 +228,7 @@ A **video frame** is any frame with none of `ISAUDIO`, `ISMETADATA`, `ISHEADER` 
 * `flags & ISKEY` — key frame. When Blue Iris re-encodes (rather than writing the camera's stream directly), `MARK` and `ISDISCONTINUITY` force an I-frame, so those frames are also key frames. On direct-to-disc recording the writer discards frames at the start of each segment until the first key frame arrives, so the first frame of every segment is a key frame regardless.
 * `flags & ISDISCONTINUITY` — set by the writer on the first frame of each recording segment (the frame whose capture time equals the segment's `tcreate`). It marks "time may have jumped before this frame", not "decoder state is invalid".
 * `flags & MARK` — set when the caller asked for a mark (e.g. manual/alert bookmark) on that frame.
-* `dio_inputs`, `state_bits` — auxiliary state snapshot (§2.2); used only for conditional overlay rendering (§7.1).
+* `dio_inputs`, `state_bits` — auxiliary state snapshot (§2.3); used only for conditional overlay rendering (§7.1).
 
 The payload is a single compressed access unit in the codec's native elementary-stream form. No length prefix, no container framing.
 
@@ -335,7 +345,7 @@ Layout (little-endian, `TCHAR` = UTF-16LE code unit, 4-byte alignment):
 | 16 | 520 | `TCHAR[260]` | `path` | Configured source: macro/text template for text objects, image path for graphic objects. Null-terminated. Informational only — rendered content arrives via type-2 records. |
 | 536 | 80 | `TCHAR[40]` | `font` | Font face name, null-terminated (only the first 32 code units are meaningful). |
 | 616 | 4 | `int32` | `nlines` | Number of text lines. |
-| 620 | 4 | `int32` | `stateflags` | "Require …" conditions, same bit layout as §2.2. Draw only when `(video.state_bits & stateflags) == stateflags`. `0` = no conditions. |
+| 620 | 4 | `int32` | `stateflags` | "Require …" conditions, same bit layout as §2.3. Draw only when `(video.state_bits & stateflags) == stateflags`. `0` = no conditions. |
 | 624 | 32 | `BYTE[32]` | `extra` | Reserved, zero. |
 | 656 | 4 | `uint32` | `dio` | Draw only when `(video.dio_inputs & dio) != 0`. `0` = always. |
 | 660 | 4 | `BYTE[4]` | `dio_x` | Reserved, zero. The reader honours `dio` only if `dio_x[2] == 0`. |
@@ -545,7 +555,7 @@ Frame:
  12   datasize     DWORD     4
  16   utc          QWORD     8   (postbytes>=16) unix ms
  24   dio_inputs   DWORD     4   (postbytes>=16)
- 28   state_bits   DWORD     4   (postbytes>=16) float audio_power for audio frames
+ 28   state_bits   DWORD     4   (postbytes>=16) version on header frame; float audio_power on audio frames
  16+postbytes      payload   datasize
 
 File header payload:
@@ -578,6 +588,7 @@ typedef struct {
     uint64_t utc;        /* unix epoch ms */
     uint32_t dio_inputs;
     union {
+        uint32_t version;      /* header frame: 0xMMmmppbb, 0 = unknown */
         uint32_t state_bits;   /* video frames */
         float    audio_power;  /* audio frames, 0..1 */
     };

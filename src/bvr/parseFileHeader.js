@@ -5,6 +5,19 @@ import {
 
 export class BvrFormatError extends Error {}
 
+/**
+ * The writer version from the header frame, as text (spec 2.2).
+ *
+ * The field is packed one component per byte, most significant first, so
+ * 0x06010211 is 6.1.2.17. Zero is *not* version 0: it means the file was written
+ * before Blue Iris 6.1.0.7 added the field, and callers get '' so they can say
+ * so in their own words.
+ */
+export function writerVersionText (version) {
+  if (!version) return ''
+  return [version >>> 24, (version >>> 16) & 0xff, (version >>> 8) & 0xff, version & 0xff].join('.')
+}
+
 /** Parses the 16-byte frame header (+ optional 16-byte extension) at `off`. */
 export function readFrameHeader (view, off) {
   const id = view.getUint32(off, true)
@@ -131,6 +144,10 @@ export async function parseFileHeader (reader) {
     frameInterval: hdr.timestamp,                     // microseconds
     fps: hdr.timestamp > 0 ? 1e6 / hdr.timestamp : 0, // nominal only
     startUtc: hdr.utc,
+    // Spec 2.2: on the header frame the field that carries camera state on every
+    // other frame holds the version of Blue Iris that wrote the file. 0 means a
+    // writer older than 6.1.0.7, which did not record it.
+    writerVersion: hdr.stateBits,
     flags: hdr.flags,
     rotation: rotateBits * 90,
     flipH: !!(hdr.flags & FLAG_FLIPH),

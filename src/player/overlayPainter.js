@@ -147,7 +147,7 @@ function drawGraphic (ctx, obj, box) {
 
 /**
  * Paints one overlay state. `stateBits` and `dio` come from the frame on screen
- * and decide which objects are eligible to draw at all (spec 2.2 / 7.1).
+ * and decide which objects are eligible to draw at all (spec 2.3 / 7.1).
  */
 export function paintOverlay (ctx, geom, { state, stateBits = 0, dio = 0, show = {} }) {
   if (!state) return

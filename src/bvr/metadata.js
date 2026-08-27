@@ -309,7 +309,7 @@ export class OverlayState {
       .catch(() => { /* an image format this browser will not decode */ })
   }
 
-  /** Objects whose draw conditions the given frame satisfies (spec 2.2 / 7.1). */
+  /** Objects whose draw conditions the given frame satisfies (spec 2.3 / 7.1). */
   visibleObjects (stateBits, dioInputs) {
     const out = []
     for (const obj of this.objects.values()) {

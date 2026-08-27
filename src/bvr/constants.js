@@ -13,7 +13,7 @@ export const FLAG_STREAMFLAGS = FLAG_ISAUDIO | FLAG_ISMETADATA | FLAG_SUBSTREAM
 // at 0x0300, read as (flags >> 8) & 3.
 export const FLAG_FLIPH = 0x0400
 
-// Per-frame camera state (spec section 2.2). Overlay objects carry the same bit
+// Per-frame camera state (spec section 2.3). Overlay objects carry the same bit
 // layout in their `stateflags` as the "Require ..." conditions.
 export const STATE_TRIGGERED = 0x1
 export const STATE_OVERLAY = 0x2
