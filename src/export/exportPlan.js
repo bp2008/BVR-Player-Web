@@ -25,9 +25,96 @@ export const AUDIO_NONE = 'none'
 export const VIDEO_TIMESCALE = 90000
 
 export const TRANSCODE_CODECS = [
-  { value: 'avc', label: 'H.264', codec: 'avc1.640028', entry: 'avc1' },
-  { value: 'hevc', label: 'H.265', codec: 'hev1.1.6.L93.B0', entry: 'hvc1' }
+  { value: 'avc', label: 'H.264', entry: 'avc1' },
+  { value: 'hevc', label: 'H.265', entry: 'hvc1' }
 ]
+
+/**
+ * Levels, and why the codec string cannot be a constant.
+ *
+ * A codec string names a level, and a level is a promise about how large and
+ * how fast the stream will be. Encoders are entitled to hold you to it: ask for
+ * High@4.0 -- 8192 macroblocks, about 2048x1024 -- and hand over 2560x1440, and
+ * a conforming encoder answers `supported: false`. Hardware encoders are queried
+ * against a profile-and-resolution table that never looks at the level and so
+ * accept it anyway, which is what makes this fail the way it does: the same
+ * clip exports fine until something pushes the browser onto its software
+ * encoder, and from then on every export of every file is rejected until the
+ * page is reloaded. The level therefore has to be computed from the output.
+ *
+ * Both tables are ordered, and the entry picked is the first that fits.
+ */
+const AVC_LEVELS = [
+  { idc: 0x1e, maxFS: 1620, maxMBPS: 40500 },       // 3.0
+  { idc: 0x1f, maxFS: 3600, maxMBPS: 108000 },      // 3.1
+  { idc: 0x20, maxFS: 5120, maxMBPS: 216000 },      // 3.2
+  { idc: 0x28, maxFS: 8192, maxMBPS: 245760 },      // 4.0
+  { idc: 0x2a, maxFS: 8704, maxMBPS: 522240 },      // 4.2
+  { idc: 0x32, maxFS: 22080, maxMBPS: 589824 },     // 5.0
+  { idc: 0x33, maxFS: 36864, maxMBPS: 983040 },     // 5.1
+  { idc: 0x34, maxFS: 36864, maxMBPS: 2073600 },    // 5.2
+  { idc: 0x3c, maxFS: 139264, maxMBPS: 4177920 },   // 6.0
+  { idc: 0x3d, maxFS: 139264, maxMBPS: 8355840 },   // 6.1
+  { idc: 0x3e, maxFS: 139264, maxMBPS: 16711680 }   // 6.2
+]
+
+const HEVC_LEVELS = [
+  { idc: 90, maxLumaPs: 552960, maxLumaSr: 16588800 },        // 3.0
+  { idc: 93, maxLumaPs: 983040, maxLumaSr: 33177600 },        // 3.1
+  { idc: 120, maxLumaPs: 2228224, maxLumaSr: 66846720 },      // 4.0
+  { idc: 123, maxLumaPs: 2228224, maxLumaSr: 133693440 },     // 4.1
+  { idc: 150, maxLumaPs: 8912896, maxLumaSr: 267386880 },     // 5.0
+  { idc: 153, maxLumaPs: 8912896, maxLumaSr: 534773760 },     // 5.1
+  { idc: 156, maxLumaPs: 8912896, maxLumaSr: 1069547520 },    // 5.2
+  { idc: 180, maxLumaPs: 35651584, maxLumaSr: 1069547520 },   // 6.0
+  { idc: 183, maxLumaPs: 35651584, maxLumaSr: 2139095040 },   // 6.1
+  { idc: 186, maxLumaPs: 35651584, maxLumaSr: 4278190080 }    // 6.2
+]
+
+/**
+ * A rate to size the level against.
+ *
+ * Rounded rather than rounded up, because a measured rate is never exact: a
+ * nominal 30 fps camera measures 30.11 across a range, and rounding that up
+ * costs a plain 1080p clip its level 4.0 -- the level every player handles --
+ * for a 4.2 nothing else about the file justifies. Unusable timing falls back
+ * to 30, which is the busiest thing a surveillance recording is likely to be.
+ */
+const levelFps = (fps) => (fps > 0 && fps < 1000 ? Math.max(1, Math.round(fps)) : 30)
+
+/**
+ * Every codec string for `value` that is at least large enough for the output,
+ * smallest first.
+ *
+ * More than one, because the first is only the smallest level that is *legal*.
+ * An encoder may still refuse it -- a hardware encoder that reports a narrow
+ * level range, a software one stricter about the bit rate a level allows -- and
+ * trying the next one up costs nothing but is the difference between an export
+ * that runs and an error message.
+ */
+export function transcodeCodecStrings (value, width, height, fps) {
+  const rate = levelFps(fps)
+  if (value === 'hevc') {
+    const ps = width * height
+    const sr = ps * rate
+    return HEVC_LEVELS
+      .filter((l) => l.maxLumaPs >= ps && l.maxLumaSr >= sr)
+      .map((l) => `hev1.1.6.L${l.idc}.B0`)
+  }
+  // Macroblocks are 16x16, and a dimension that is not a multiple of 16 still
+  // costs a whole row or column of them.
+  const fs = Math.ceil(width / 16) * Math.ceil(height / 16)
+  const mbps = fs * rate
+  return AVC_LEVELS
+    .filter((l) => l.maxFS >= fs && l.maxMBPS >= mbps)
+    .map((l) => `avc1.6400${l.idc.toString(16).padStart(2, '0')}`)
+}
+
+/** The smallest codec string that fits, which is what the plan reports. */
+export function transcodeCodecString (value, width, height, fps) {
+  const all = transcodeCodecStrings(value, width, height, fps)
+  return all[0] || (value === 'hevc' ? 'hev1.1.6.L186.B0' : 'avc1.64003e')
+}
 
 export const DEFAULT_OPTIONS = {
   mode: MODE_REMUX,
@@ -216,10 +303,24 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
   const outHeight = even(capHeight)
   const outWidth = even(shown.width * scale)
 
+  // The rate the level has to cover. A cap is exact; without one the source's
+  // own rate is what the encoder will see, measured across the selected range
+  // rather than taken from the header, which a recording with gaps overstates.
+  const srcFps = frames > 1 && spanMs > 0 ? ((frames - 1) * 1000) / spanMs : 0
+  const outFps = opts.fps > 0 ? opts.fps : srcFps
+  const codecString = mode === MODE_TRANSCODE
+    ? transcodeCodecString(opts.videoCodec, outWidth, outHeight, outFps)
+    : ''
+
   return {
     mode,
     copyable,
     options: opts,
+    outFps,
+    // The full codec string the encoder will be asked for. It carries a level,
+    // and a level that does not cover the output size is refused outright by any
+    // encoder that checks -- see the tables above.
+    codecString,
     fileName: suggestName(fileName, startMs, endMs, duration),
     startMs: mode === MODE_REMUX ? pstream.ts[range.decodeFrom] : startMs,
     requestedStartMs: startMs,

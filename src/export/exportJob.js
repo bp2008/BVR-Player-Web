@@ -4,7 +4,9 @@ import { Mp4Muxer } from './mp4Muxer.js'
 import {
   ParameterSets, annexBToLengthPrefixed, buildDecoderConfig, sampleEntryFor, isLengthPrefixed
 } from './bitstream.js'
-import { MODE_REMUX, TRANSCODE_CODECS, VIDEO_TIMESCALE } from './exportPlan.js'
+import {
+  MODE_REMUX, TRANSCODE_CODECS, VIDEO_TIMESCALE, transcodeCodecStrings
+} from './exportPlan.js'
 
 /**
  * Runs an export planned by `planExport`.
@@ -137,14 +139,21 @@ export class ExportJob {
     const sampleRate = wfx.nSamplesPerSec
     const channels = Math.max(1, Math.min(2, wfx.nChannels))
 
+    // Held out here so the `finally` can close whatever was built, whichever
+    // step threw. A codec object that is dropped without `close()` stays live
+    // for the life of the page, and the audio path is the one that gives up
+    // quietly -- so without this a run of failed exports silently accumulates
+    // encoders and decoders until nothing will configure any more.
+    let decode = null
+    let encoder = null
     try {
-      const decode = await this._audioDecoder()
+      decode = await this._audioDecoder()
       const chunks = []
       let description = null
       let bytes = 0
       let failed = null
 
-      const encoder = new AudioEncoder({
+      encoder = new AudioEncoder({
         output: (chunk, metadata) => {
           if (metadata && metadata.decoderConfig && metadata.decoderConfig.description && !description) {
             const d = metadata.decoderConfig.description
@@ -180,8 +189,6 @@ export class ExportJob {
         if (failed) throw failed
         if (bytes > AUDIO_MEMORY_LIMIT) {
           this.warnings.push('The audio track grew past the memory budget for an export and was dropped.')
-          encoder.close()
-          decode.close()
           return null
         }
         const raw = await this.reader.readCopy(a.offset[i], a.size[i])
@@ -193,15 +200,19 @@ export class ExportJob {
         if ((i - from) % 32 === 0) this._report('audio', i - from, total)
       }
       await encoder.flush()
-      encoder.close()
-      decode.close()
       if (failed) throw failed
       if (!chunks.length) return null
 
       return { chunks, description, sampleRate, channels, bytes }
     } catch (e) {
+      // A cancellation is the user's answer about the whole export, not a
+      // reason to carry on without sound.
+      if (e instanceof ExportCancelled) throw e
       this.warnings.push(`Audio was left out: ${e && e.message ? e.message : e}`)
       return null
+    } finally {
+      if (encoder) { try { encoder.close() } catch { /* already torn down */ } }
+      if (decode) { try { decode.close() } catch { /* already torn down */ } }
     }
   }
 
@@ -569,6 +580,8 @@ export class ExportJob {
     let lastGapMs = 0
     const pending = []
 
+    const encoderConfig = await this._encoderConfig(codec)
+
     const encoder = new VideoEncoder({
       output: (chunk, metadata) => {
         if (metadata && metadata.decoderConfig && metadata.decoderConfig.description && !videoTrack.config) {
@@ -582,23 +595,6 @@ export class ExportJob {
       },
       error: (e) => { failure = e }
     })
-
-    const encoderConfig = {
-      codec: codec.codec,
-      width: plan.outWidth,
-      height: plan.outHeight,
-      bitrate: plan.options.videoBitrate,
-      framerate: plan.options.fps > 0 ? plan.options.fps : undefined,
-      // Encoders may emit B-frames when left to optimise for quality, which
-      // would put the samples out of presentation order. The muxer can express
-      // that, but a surveillance clip has nothing to gain from it.
-      latencyMode: 'realtime'
-    }
-    encoderConfig[codec.value === 'hevc' ? 'hevc' : 'avc'] = { format: codec.value === 'hevc' ? 'hevc' : 'avc' }
-    const support = await VideoEncoder.isConfigSupported(encoderConfig)
-    if (!support || !support.supported) {
-      throw new Error(`This device cannot encode ${codec.label} at ${plan.outWidth}x${plan.outHeight}.`)
-    }
     encoder.configure(encoderConfig)
 
     // One decoder per source stream. A merged `auto` sequence can carry H.265
@@ -735,6 +731,59 @@ export class ExportJob {
     await this._drainAudio(mux, audioTrack, audio, Infinity)
     this._report('video', total, total)
     return { frames: written, mode: 'transcode' }
+  }
+
+  /**
+   * Settles on an encoder configuration the platform will actually accept.
+   *
+   * Nothing is constructed until one is found, so a rejected export leaves no
+   * encoder behind -- a leaked one is a live codec instance for the life of the
+   * page, and enough of them is what turns one failed export into every later
+   * export failing until the tab is reloaded.
+   *
+   * The candidates differ only in level. The smallest legal one is tried first
+   * because it is the most widely supported; the rest are there for encoders
+   * that advertise a narrower range than the output needs, and cost one
+   * `isConfigSupported` call each.
+   */
+  async _encoderConfig (codec) {
+    const plan = this.plan
+    const hevc = codec.value === 'hevc'
+    const base = {
+      width: plan.outWidth,
+      height: plan.outHeight,
+      bitrate: plan.options.videoBitrate,
+      framerate: plan.options.fps > 0 ? plan.options.fps : undefined,
+      // Encoders may emit B-frames when left to optimise for quality, which
+      // would put the samples out of presentation order. The muxer can express
+      // that, but a surveillance clip has nothing to gain from it.
+      latencyMode: 'realtime'
+    }
+    base[hevc ? 'hevc' : 'avc'] = { format: hevc ? 'hevc' : 'avc' }
+
+    const strings = transcodeCodecStrings(
+      codec.value, plan.outWidth, plan.outHeight, plan.outFps)
+    if (plan.codecString && strings[0] !== plan.codecString) strings.unshift(plan.codecString)
+
+    let tried = ''
+    for (const codecString of strings) {
+      const config = { ...base, codec: codecString }
+      let support = null
+      try {
+        support = await VideoEncoder.isConfigSupported(config)
+      } catch { /* an outright rejection of the string; try the next level */ }
+      if (support && support.supported) {
+        if (codecString !== strings[0]) {
+          this.warnings.push(
+            `The encoder would not take ${strings[0]}, so ${codecString} was used instead.`)
+        }
+        return support.config || config
+      }
+      tried = tried ? `${tried}, ${codecString}` : codecString
+    }
+    throw new Error(
+      `This device cannot encode ${codec.label} at ${plan.outWidth}x${plan.outHeight} ` +
+      `(tried ${tried || 'no usable level'}).`)
   }
 
   _scaleFrame (frame, canvas, ctx, plan, timestamp) {
