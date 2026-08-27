@@ -40,6 +40,9 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |
 
+The controls fade out while the pointer sits still; turn on **Always show the
+controls** in the settings panel to keep them up.
+
 ## More
 
 - [Development.md](Development.md) — building, architecture, and how each

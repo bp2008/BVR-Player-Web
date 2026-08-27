@@ -442,6 +442,12 @@ export default {
       if (status === 'ready') this.onFileReady()
       else if (status !== 'loading') this.closeFilePanels()
     },
+    // Turning it on has to put the chrome back immediately -- the timer that
+    // hid it has already run -- and turning it off should start the fade again
+    // rather than wait for the next pointer move.
+    'settings.alwaysShowControls' () {
+      this.wakeUi()
+    },
     'settings.matchAspect' (on) {
       if (this.player) this.player.setMatchAspect(on)
     },
@@ -1101,6 +1107,7 @@ export default {
       this.scheduleHide()
     },
     canHideUi () {
+      if (this.settings.alwaysShowControls) return false
       if (!this.hasFile || this.state.status !== 'ready') return false
       if (this.menuOpen || this.scrubbing || this.pointerOverChrome) return false
       if (this.libraryOpen || this.dragging || this.resizeDrag) return false

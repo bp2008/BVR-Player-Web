@@ -13,6 +13,8 @@ import { Renderer } from './Renderer.js'
 import { paintOverlay } from './overlayPainter.js'
 import { snapshotOverlay } from '../bvr/metadata.js'
 import { audioCodecLabel } from './audioCodecs.js'
+import { streamLabelFor } from '../container/mediaInfo.js'
+import { STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
@@ -985,32 +987,65 @@ export class BvrPlayer {
    * reach into the player's internals.
    */
   exportContext () {
-    if (!this.pstream || !this.index) return null
+    if (!this.index || !this.header) return null
     return {
       blob: this.blob,
       header: this.header,
       index: this.index,
+      // The sequence on screen. The metadata panel reports on what is being
+      // watched, so this stays the player's; the export builds its own.
       pstream: this.pstream,
       fileName: this._state.fileName,
+      // The stream the player happens to be showing. Only the export's *initial*
+      // choice: it builds its own sequence from there, so which stream gets
+      // exported is the dialog's to decide and can be changed without disturbing
+      // playback. Tying the two together is what used to make the export's
+      // options depend on how the player was set when the file was opened.
+      streamMode: this.streamMode,
+      // What the merged sequence is allowed to draw on, and the real picture
+      // sizes to build any of the three sequences with.
+      playable: this._playable(),
+      probedSizes: this._probedSizes(),
+      // Everything the export needs to know about each of the file's video
+      // streams, whether or not it is the one on screen.
+      streamInfo: this._streamInfo(),
       // The shape the picture is being shown in, so an export comes out looking
       // like what was on screen. Null when the correction is switched off.
       reference: this._referenceShape(),
-      // The probe already settled these against real key frames, and they are
-      // what a transcode has to configure its decoders with -- one per source
-      // stream, since a merged sequence may hold two codecs.
-      decoderConfigs: this._decoderConfigs(),
       audioStarts: this.audio ? this.audio.packetStartMs : null
     }
   }
 
-  /** Decoder configuration per source stream, sparse by stream id. */
-  _decoderConfigs () {
-    const info = this.codecInfo
-    if (!info || !this.pstream) return null
+  /**
+   * Each video stream the file holds, as the export dialog needs to see it.
+   *
+   * Sparse by stream id, and drawn from the probe rather than from whatever is
+   * playing: the dialog offers all of them, so it needs the size, the codec and
+   * the decoder configuration of the stream that is *not* on screen just as much
+   * as the one that is. `config` is null for a stream this device cannot decode,
+   * which rules out re-encoding it but not copying it.
+   */
+  _streamInfo () {
+    const both = this.index.streams[STREAM_MAIN].count > 0 &&
+      this.index.streams[STREAM_SUB].count > 0
+    const sizes = this._probedSizes()
     const out = []
-    for (const si of (this.pstream.sources || [this.pstream.codecSource])) {
-      const codec = (info.bySource && info.bySource[si]) || info
-      out[si] = codec.kind === 'video' ? codec.config : null
+    for (const si of [STREAM_MAIN, STREAM_SUB]) {
+      const s = this.index.streams[si]
+      if (!s || s.count === 0) { out[si] = null; continue }
+      const probed = this.probe && this.probe.streams[si]
+      const bmih = this.header.bmih[si] || this.header.bmih[0]
+      const size = (sizes && sizes[si]) || null
+      out[si] = {
+        label: streamLabelFor(this.header.container, si, both),
+        width: (size && size.width) || (bmih && bmih.width) || 0,
+        height: (size && size.height) || (bmih && bmih.height) || 0,
+        fourcc: (bmih && bmih.fourcc) || '',
+        codecLabel: probed ? probed.codec.label : '',
+        supported: probed ? probed.supported : true,
+        config: probed && probed.codec.kind === 'video' ? probed.codec.config : null,
+        frames: s.count
+      }
     }
     return out
   }

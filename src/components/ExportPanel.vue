@@ -60,13 +60,21 @@
         </p>
       </div>
 
+      <div v-if="sourceOptions.length > 1" class="export__field">
+        <span class="export__label">Video source</span>
+        <select class="settings__select export__source" :value="options.source" @change="patch({ source: $event.target.value })" @keydown.stop>
+          <option v-for="o in sourceOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+        <p v-if="sourceHint" class="export__hint">{{ sourceHint }}</p>
+      </div>
+
       <div class="export__field">
         <span class="export__label">Method</span>
         <label class="export__radio">
           <input type="radio" value="remux" :checked="options.mode === 'remux'" :disabled="!plan.copyable" @change="patch({ mode: 'remux' })" />
           <span>
             Copy frames
-            <em>{{ plan.copyable ? 'Fast, no quality loss' : 'Not possible for this stream' }}</em>
+            <em>{{ plan.copyable ? 'Fast, no quality loss' : plan.copyBlocker }}</em>
           </span>
         </label>
         <label class="export__radio">
@@ -147,6 +155,18 @@
         <div><dt>File name</dt><dd class="export__filename">{{ plan.fileName }}</dd></div>
       </dl>
 
+      <div v-if="encoderCheck.blocked" class="export__warnings export__warnings--error">
+        <p class="export__blocked">
+          This device cannot encode {{ codecLabel }} at {{ plan.outWidth }}&times;{{ plan.outHeight }}.
+        </p>
+        <p v-if="encoderCheck.alt" class="export__blocked">
+          <button type="button" class="btn btn--tiny" @click="patch({ maxHeight: encoderCheck.alt })">
+            Use {{ encoderCheck.alt }}p instead
+          </button>
+        </p>
+        <p v-else class="export__blocked">No smaller preset is accepted either; try the other codec.</p>
+      </div>
+
       <ul v-if="plan.warnings.length" class="export__warnings">
         <li v-for="(w, i) in plan.warnings" :key="i">{{ w }}</li>
       </ul>
@@ -158,7 +178,7 @@
       </p>
 
       <div class="export__actions">
-        <button type="button" class="btn btn--accent btn--wide" :disabled="!plan.ok" @click="start">
+        <button type="button" class="btn btn--accent btn--wide" :disabled="!plan.ok || encoderCheck.blocked" @click="start">
           <AppIcon name="download" :size="17" />
           <span>Export</span>
         </button>
@@ -170,9 +190,14 @@
 <script>
 import AppIcon from './AppIcon.vue'
 import { formatBytes, formatTime, parseTime } from '../util/format.js'
-import { planExport, DEFAULT_OPTIONS, TRANSCODE_CODECS } from '../export/exportPlan.js'
+import {
+  planExport, chooseEncoderConfig, outputSize,
+  DEFAULT_OPTIONS, TRANSCODE_CODECS, SOURCE_MAIN, SOURCE_SUB, SOURCE_BOTH
+} from '../export/exportPlan.js'
 import { ExportJob, ExportCancelled } from '../export/exportJob.js'
 import { canStreamToDisk, deliver, openOutput } from '../export/sink.js'
+import { buildPlaybackStream } from '../player/playbackStream.js'
+import { STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 
 // The two ends of the range, in the order they are shown.
 const ENDS = ['start', 'end']
@@ -215,24 +240,116 @@ export default {
       job: null,
       codecs: TRANSCODE_CODECS,
       heights: [1440, 1080, 720, 480, 360],
-      streaming: canStreamToDisk()
+      streaming: canStreamToDisk(),
+      // Whether this device will encode what is currently configured. Asked
+      // asynchronously and cached against the settings it was asked about, so
+      // that typing in the range fields does not re-probe the encoder.
+      encoderCheck: { key: '', blocked: false, alt: 0 },
+      // Set when the method was moved off "copy" because the chosen source
+      // could not be copied, so that picking a source that can be restores it.
+      forcedTranscode: false
     }
   },
   computed: {
     noEncoder () { return typeof VideoEncoder === 'undefined' },
     hasAudio () { return !!(this.context && this.context.header && this.context.header.hasAudio) },
-    plan () {
-      if (!this.context) return null
+
+    /**
+     * The video sources this recording can offer, and what each one is.
+     *
+     * A file with one video stream offers one, and the picker hides itself. The
+     * sizes are in the labels because choosing between two streams is mostly
+     * choosing between two resolutions, and the resolution list below is about
+     * the *output* rather than the source.
+     */
+    sourceOptions () {
+      const info = this.context && this.context.streamInfo
+      if (!info) return []
+      const out = []
+      const shape = (s) => (s.width && s.height ? ` (${s.width}×${s.height})` : '')
+      if (info[STREAM_MAIN]) out.push({ value: SOURCE_MAIN, label: info[STREAM_MAIN].label + shape(info[STREAM_MAIN]) })
+      if (info[STREAM_SUB]) out.push({ value: SOURCE_SUB, label: info[STREAM_SUB].label + shape(info[STREAM_SUB]) })
+      if (info[STREAM_MAIN] && info[STREAM_SUB]) out.push({ value: SOURCE_BOTH, label: 'Both (main preferred)' })
+      return out
+    },
+    sourceHint () {
+      if (this.options.source !== SOURCE_BOTH) return ''
+      return 'One video track that plays the main stream wherever it reaches and ' +
+        'scales the sub stream up to cover the rest — the same sequence Auto plays.'
+    },
+
+    /**
+     * The frame sequence the export will read, built here rather than taken
+     * from the player.
+     *
+     * Recomputed only when the file or the chosen source changes: it allocates
+     * a table the length of the recording, and `plan` below re-runs on every
+     * keystroke in the range fields.
+     *
+     * 'main' and 'sub' are built as if both were decodable, because a stream
+     * copy never decodes anything and a source the user explicitly asked for
+     * should not silently turn into the other one. 'both' gets the real verdict,
+     * since deciding what it can draw on is the whole of what it does.
+     */
+    pstream () {
+      const c = this.context
+      if (!c || !c.index || !c.header) return null
+      const source = this.options.source
+      const mode = source === SOURCE_BOTH ? 'auto' : source
+      const playable = source === SOURCE_BOTH ? c.playable : [true, true]
       try {
-        return planExport({
+        return buildPlaybackStream(c.index, c.header, mode, playable, c.probedSizes)
+      } catch (e) {
+        return null
+      }
+    },
+
+    /** Decoder configuration per source stream, for whichever streams this sequence uses. */
+    decoderConfigs () {
+      const info = this.context && this.context.streamInfo
+      const s = this.pstream
+      if (!info || !s) return null
+      const out = []
+      for (const si of (s.sources || [s.codecSource])) out[si] = (info[si] && info[si].config) || null
+      return out
+    },
+
+    /** Streams the sequence needs to decode but this device cannot. */
+    undecodable () {
+      const info = this.context && this.context.streamInfo
+      const s = this.pstream
+      if (!info || !s) return []
+      return (s.sources || [s.codecSource])
+        .filter((si) => info[si] && !info[si].supported)
+        .map((si) => info[si])
+    },
+
+    codecLabel () {
+      const c = TRANSCODE_CODECS.find((x) => x.value === this.options.videoCodec)
+      return c ? c.label : ''
+    },
+
+    plan () {
+      if (!this.context || !this.pstream || !this.pstream.count) return null
+      try {
+        const plan = planExport({
           header: this.context.header,
           index: this.context.index,
-          pstream: this.context.pstream,
+          pstream: this.pstream,
           audioStarts: this.context.audioStarts,
           fileName: this.context.fileName,
           reference: this.context.reference,
           options: { ...this.options, startMs: this.trim.start, endMs: this.trim.end }
         })
+        // A copy moves bytes and never decodes, so an undecodable stream is only
+        // an obstacle to re-encoding it.
+        if (plan.mode === 'transcode' && this.undecodable.length) {
+          plan.errors.push(
+            `This device cannot decode the ${this.undecodable.map((s) => s.label.toLowerCase()).join(' or ')}` +
+            `${plan.copyable ? ', so it cannot be re-encoded here. Copy frames instead.' : '.'}`)
+          plan.ok = false
+        }
+        return plan
       } catch (e) {
         return null
       }
@@ -267,16 +384,26 @@ export default {
   watch: {
     // A different recording invalidates a finished report as much as it does a
     // half-configured job.
-    context () {
-      this.result = null
-      if (this.plan && !this.plan.copyable) this.options = { ...this.options, mode: 'transcode' }
+    context: { handler: 'adoptContext', immediate: true },
+    // A copy is the better outcome wherever it is available, so the method
+    // follows what the chosen source can do -- and goes back to a copy when a
+    // source that can be copied is picked again. Only where the fallback was
+    // ours: a method the user chose is left alone.
+    'plan.copyable': {
+      handler (can) {
+        if (can == null) return
+        if (!can && this.options.mode === 'remux') {
+          this.forcedTranscode = true
+          this.patch({ mode: 'transcode' })
+        } else if (can && this.forcedTranscode) {
+          this.forcedTranscode = false
+          this.patch({ mode: 'remux' })
+        }
+      },
+      immediate: true
     },
+    plan: { handler: 'checkEncoder', immediate: true },
     trim: { handler () { this.syncEdits() }, immediate: true }
-  },
-  mounted () {
-    // A stream copy is the right default whenever it is possible; the plan
-    // silently falls back for the streams where it is not.
-    if (this.plan && !this.plan.copyable) this.options.mode = 'transcode'
   },
   beforeUnmount () {
     if (this.job) this.job.cancel()
@@ -290,6 +417,76 @@ export default {
       return Math.min(hi, Math.max(lo, n))
     },
     patch (p) { this.options = { ...this.options, ...p } },
+
+    /**
+     * Points the panel at a newly opened recording.
+     *
+     * The source starts as whatever the player is showing, so opening the panel
+     * describes what is on screen. It is only a starting point: changing it here
+     * changes the export and nothing else, which is the whole reason the export
+     * builds its own sequence rather than borrowing the player's.
+     */
+    adoptContext () {
+      this.result = null
+      this.forcedTranscode = false
+      this.encoderCheck = { key: '', blocked: false, alt: 0 }
+      if (!this.context) return
+      const want = this.context.streamMode === 'sub' ? SOURCE_SUB
+        : this.context.streamMode === 'auto' ? SOURCE_BOTH
+          : SOURCE_MAIN
+      const offered = this.sourceOptions.map((o) => o.value)
+      this.patch({ source: offered.includes(want) ? want : (offered[0] || SOURCE_MAIN) })
+    },
+
+    /**
+     * Asks the encoder whether it will take the configured output, ahead of time.
+     *
+     * The alternative is finding out from a failed export, which is how this
+     * started: the message arrives after the file has been named, and it names a
+     * resolution rather than the thing that can be changed about it. Asking here
+     * turns it into a sentence beside a button that fixes it.
+     *
+     * Keyed on the settings it asked about so that typing in the range fields --
+     * which rebuilds the plan on every keystroke -- does not re-probe anything.
+     */
+    async checkEncoder () {
+      const plan = this.plan
+      if (!plan || plan.mode !== 'transcode' || this.noEncoder) {
+        if (this.encoderCheck.key) this.encoderCheck = { key: '', blocked: false, alt: 0 }
+        return
+      }
+      const key = [plan.options.videoCodec, plan.outWidth, plan.outHeight,
+        Math.round(plan.outFps * 100), plan.options.videoBitrate].join('/')
+      if (key === this.encoderCheck.key) return
+      // Optimistic while the answer is pending. "Yes" is the overwhelmingly
+      // common case, and an Export button that greys itself out for a moment on
+      // every change is worse than one that turns off a beat late.
+      this.encoderCheck = { key, blocked: false, alt: 0 }
+
+      const ask = (width, height) => chooseEncoderConfig({
+        codec: plan.options.videoCodec,
+        width,
+        height,
+        fps: plan.outFps,
+        bitrate: plan.options.videoBitrate
+      })
+      const stale = () => this.encoderCheck.key !== key
+
+      const chosen = await ask(plan.outWidth, plan.outHeight)
+      if (stale() || (chosen && chosen.config)) return
+
+      // The largest preset it will take, which is what the offer to downscale
+      // has to name.
+      let alt = 0
+      for (const h of this.heights) {
+        if (h >= plan.outHeight) continue
+        const size = outputSize(plan.displayWidth, plan.displayHeight, h)
+        const r = await ask(size.width, size.height)
+        if (stale()) return
+        if (r && r.config) { alt = h; break }
+      }
+      this.encoderCheck = { key, blocked: true, alt }
+    },
 
     // ------------------------------------------------------------------ range
 
@@ -351,7 +548,7 @@ export default {
     },
     async start () {
       const plan = this.plan
-      if (!plan || !plan.ok || this.running) return
+      if (!plan || !plan.ok || this.running || this.encoderCheck.blocked) return
       // The file picker needs the activation from this very click, so it is
       // opened before anything is awaited.
       let sink
@@ -370,8 +567,8 @@ export default {
         blob: this.context.blob,
         header: this.context.header,
         index: this.context.index,
-        pstream: this.context.pstream,
-        plan: { ...plan, decoderConfigs: this.context.decoderConfigs },
+        pstream: this.pstream,
+        plan: { ...plan, decoderConfigs: this.decoderConfigs },
         sink,
         onProgress: (p) => { this.progress = p.progress; this.stage = p.stage }
       })
@@ -547,6 +744,25 @@ export default {
 
 .export__filename {
   overflow-wrap: anywhere;
+}
+
+/* The shared select is sized for the label-beside-control rows. This one sits
+   in a column under its label, where a stream name and its resolution need the
+   full width. */
+.export__source {
+  max-width: none;
+  width: 100%;
+}
+
+/* The encoder-refusal notice is prose plus a button rather than a bullet list,
+   so it opts out of the list padding its container carries for warnings. */
+.export__blocked {
+  margin: 0;
+  padding: 0;
+}
+
+.export__blocked + .export__blocked {
+  margin-top: 7px;
 }
 
 /* A quieter second line under a summary value -- how the shape correction is

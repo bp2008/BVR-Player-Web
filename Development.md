@@ -17,6 +17,7 @@ BVR-Player-Web. For what the app is and how to drive it, see
 
 The skip interval (default 10 s), whether a recording starts playing when it is
 opened (it does), time display (elapsed or wall clock), loop, playback speed,
+whether the controls stay on screen rather than fading out,
 overlay drawing, whether scrubbing decodes the exact frame rather than the
 nearest key frame (it does), whether playback pauses while you seek, and — for dual-stream
 recordings — the main/sub stream selection and whether the two are shown in the
@@ -43,6 +44,32 @@ browser has been doing than about this page. It is presented as an approximation
 for that reason. The thumbnail *count* beside it is read from the store and is
 exact. Chrome's own accounting also lags a delete by a while, so the count drops
 at once where the size does not.
+
+### The top bar and control bar
+
+Both fade out after a couple of seconds of a motionless pointer and come back
+the moment it moves — 2.6 s for a mouse, 4.2 s for touch, which has no hover to
+bring them back with and so is given longer. Plenty pins them open in the
+meantime: the pointer resting on the bars themselves, an open menu, a drag of
+the scrub bar, the folder browser, a panel being dragged or resized, and
+keyboard focus anywhere inside the chrome — hiding a control someone tabbed to
+would strand them. Nothing hides while a recording is still loading.
+
+**Always show the controls**, in the settings panel, turns the fading off
+entirely. The default stays as it was, because on a player the picture is the
+point, but the disappearing act surprises people who expect a seek bar to stay
+where they left it, and there is no way to discover the setting exists except by
+finding it in the panel — so it is stated in plain terms there rather than
+buried in the picture group.
+
+It is one test, `canHideUi()`, that every route to hiding already had to pass:
+the idle timer, the pointer leaving the window, and anything added later. The
+setting is the first line of that test, which is why turning it on cannot leave
+some other path still able to drop the chrome. Turning it on also has to put the
+chrome back at once — the timer that hid it has already run and there is nothing
+left to cancel — so the setting is watched, and both directions go through
+`wakeUi()`: on, it reappears and no new timer is armed; off, the fade starts
+again without waiting for the next pointer move.
 
 ### Seeking and scrubbing
 

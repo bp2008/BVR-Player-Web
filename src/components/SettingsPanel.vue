@@ -62,6 +62,23 @@
       </span>
     </label>
 
+    <h3 class="spanel__h">Controls</h3>
+
+    <label class="spanel__row spanel__row--toggle">
+      <span class="spanel__label">
+        Always show the controls
+        <em class="spanel__sub">{{ chromeSummary }}</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.alwaysShowControls"
+        @change="emitPatch({ alwaysShowControls: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
+    </label>
+
     <h3 class="spanel__h">Seeking</h3>
 
     <label class="spanel__row spanel__row--toggle">
@@ -340,6 +357,12 @@ export default {
     this.readStorage()
   },
   computed: {
+    /** Says which way round the chrome behaves, so the toggle needs no label. */
+    chromeSummary () {
+      return this.settings.alwaysShowControls
+        ? 'The top bar and control bar stay on screen, over the picture'
+        : 'They fade out while the pointer sits still, and come back when it moves'
+    },
     /** Says what the setting costs, in the terms that decide it. */
     scrubExactSummary () {
       return this.settings.scrubExact

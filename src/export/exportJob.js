@@ -5,7 +5,7 @@ import {
   ParameterSets, annexBToLengthPrefixed, buildDecoderConfig, sampleEntryFor, isLengthPrefixed
 } from './bitstream.js'
 import {
-  MODE_REMUX, TRANSCODE_CODECS, VIDEO_TIMESCALE, transcodeCodecStrings
+  MODE_REMUX, TRANSCODE_CODECS, VIDEO_TIMESCALE, chooseEncoderConfig
 } from './exportPlan.js'
 
 /**
@@ -740,50 +740,27 @@ export class ExportJob {
    * encoder behind -- a leaked one is a live codec instance for the life of the
    * page, and enough of them is what turns one failed export into every later
    * export failing until the tab is reloaded.
-   *
-   * The candidates differ only in level. The smallest legal one is tried first
-   * because it is the most widely supported; the rest are there for encoders
-   * that advertise a narrower range than the output needs, and cost one
-   * `isConfigSupported` call each.
    */
   async _encoderConfig (codec) {
     const plan = this.plan
-    const hevc = codec.value === 'hevc'
-    const base = {
+    const chosen = await chooseEncoderConfig({
+      codec: codec.value,
       width: plan.outWidth,
       height: plan.outHeight,
-      bitrate: plan.options.videoBitrate,
-      framerate: plan.options.fps > 0 ? plan.options.fps : undefined,
-      // Encoders may emit B-frames when left to optimise for quality, which
-      // would put the samples out of presentation order. The muxer can express
-      // that, but a surveillance clip has nothing to gain from it.
-      latencyMode: 'realtime'
+      fps: plan.outFps,
+      bitrate: plan.options.videoBitrate
+    })
+    if (!chosen || !chosen.config) {
+      const tried = chosen && chosen.tried.length ? chosen.tried.join(', ') : 'no usable level'
+      throw new Error(
+        `This device cannot encode ${codec.label} at ${plan.outWidth}x${plan.outHeight} ` +
+        `(tried ${tried}). Choose a smaller resolution and try again.`)
     }
-    base[hevc ? 'hevc' : 'avc'] = { format: hevc ? 'hevc' : 'avc' }
-
-    const strings = transcodeCodecStrings(
-      codec.value, plan.outWidth, plan.outHeight, plan.outFps)
-    if (plan.codecString && strings[0] !== plan.codecString) strings.unshift(plan.codecString)
-
-    let tried = ''
-    for (const codecString of strings) {
-      const config = { ...base, codec: codecString }
-      let support = null
-      try {
-        support = await VideoEncoder.isConfigSupported(config)
-      } catch { /* an outright rejection of the string; try the next level */ }
-      if (support && support.supported) {
-        if (codecString !== strings[0]) {
-          this.warnings.push(
-            `The encoder would not take ${strings[0]}, so ${codecString} was used instead.`)
-        }
-        return support.config || config
-      }
-      tried = tried ? `${tried}, ${codecString}` : codecString
+    if (chosen.fallback) {
+      this.warnings.push(
+        `The encoder would not take ${chosen.tried[0]}, so ${chosen.codecString} was used instead.`)
     }
-    throw new Error(
-      `This device cannot encode ${codec.label} at ${plan.outWidth}x${plan.outHeight} ` +
-      `(tried ${tried || 'no usable level'}).`)
+    return chosen.config
   }
 
   _scaleFrame (frame, canvas, ctx, plan, timestamp) {

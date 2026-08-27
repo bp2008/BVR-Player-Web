@@ -19,6 +19,12 @@ export const DEFAULT_SETTINGS = {
   // but it is a guess, and a guess the viewer can decline.
   matchAspect: true,
 
+  // The top bar and control bar fade out while the pointer sits still over a
+  // playing recording. That is the right default -- the picture is the point --
+  // but it surprises people who expect a seek bar to stay put, so it can be
+  // turned off and the chrome pinned open for good.
+  alwaysShowControls: false,
+
   // Scrubbing. Exact frames while dragging are on: the picture under the pointer
   // is the one a drag is looking for, and on the recordings this player is for --
   // a few seconds between key frames -- decoding up to it keeps up. It is the

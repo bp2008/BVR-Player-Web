@@ -116,8 +116,76 @@ export function transcodeCodecString (value, width, height, fps) {
   return all[0] || (value === 'hevc' ? 'hev1.1.6.L186.B0' : 'avc1.64003e')
 }
 
+/**
+ * The samples a re-encode would write, for a display shape and a height cap.
+ *
+ * Shared rather than inlined because the panel asks the same question the plan
+ * does -- "what size would this come out at?" -- when it is working out which
+ * smaller size the encoder would accept, and two copies of the rounding would
+ * eventually disagree about a pixel.
+ */
+export function outputSize (displayWidth, displayHeight, maxHeight) {
+  // Encoders reject odd dimensions for 4:2:0 chroma, and the corrected size is
+  // as likely to be odd as any other.
+  const even = (v) => Math.max(2, Math.round(v / 2) * 2)
+  const capHeight = maxHeight > 0 ? Math.min(maxHeight, displayHeight) : displayHeight
+  const scale = displayHeight > 0 ? capHeight / displayHeight : 1
+  return { width: even(displayWidth * scale), height: even(capHeight) }
+}
+
+/**
+ * The encoder configuration this device will actually accept, or null.
+ *
+ * Asked twice: by the job, which needs one to run, and by the panel, which asks
+ * ahead of time so that "this device cannot encode that" is something the user
+ * reads while they can still choose a smaller size, rather than an error after
+ * they have picked a filename. One implementation so the two cannot disagree.
+ *
+ * The candidates differ only in level. The smallest legal one is tried first
+ * because it is the most widely supported; the rest are there for encoders that
+ * advertise a narrower range than the output needs, and cost one
+ * `isConfigSupported` call each.
+ */
+export async function chooseEncoderConfig ({ codec, width, height, fps, bitrate }) {
+  if (typeof VideoEncoder === 'undefined') return null
+  const hevc = codec === 'hevc'
+  const base = {
+    width,
+    height,
+    bitrate,
+    framerate: fps > 0 ? fps : undefined,
+    // Encoders may emit B-frames when left to optimise for quality, which would
+    // put the samples out of presentation order. The muxer can express that, but
+    // a surveillance clip has nothing to gain from it.
+    latencyMode: 'realtime'
+  }
+  base[hevc ? 'hevc' : 'avc'] = { format: hevc ? 'hevc' : 'avc' }
+
+  const tried = []
+  for (const codecString of transcodeCodecStrings(codec, width, height, fps)) {
+    const config = { ...base, codec: codecString }
+    tried.push(codecString)
+    let support = null
+    try {
+      support = await VideoEncoder.isConfigSupported(config)
+    } catch { /* an outright rejection of the string; try the next level */ }
+    if (support && support.supported) {
+      return { config: support.config || config, codecString, tried, fallback: tried.length > 1 }
+    }
+  }
+  return { config: null, codecString: '', tried, fallback: false }
+}
+
+export const SOURCE_MAIN = 'main'
+export const SOURCE_SUB = 'sub'
+export const SOURCE_BOTH = 'both'
+
 export const DEFAULT_OPTIONS = {
   mode: MODE_REMUX,
+  // Which of the recording's video streams the export is built from. 'both' is
+  // the merged single-track sequence -- the main stream wherever it reaches,
+  // the sub stream scaled up to fill the gaps -- which is what `auto` plays.
+  source: SOURCE_MAIN,
   startMs: 0,
   endMs: Infinity,
   audio: AUDIO_AAC,
@@ -231,6 +299,16 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
 
   const fourcc = pstream.fourcc || ''
   const copyable = canRemux(fourcc) && !pstream.variableResolution && !pstream.mixedCodecs
+  // Why not, in the few words the dialog has room for. The long-form version is
+  // in `warnings`, but that only appears once a copy has actually been asked
+  // for and refused -- this is what the disabled radio says about itself.
+  const copyBlocker = copyable
+    ? ''
+    : !canRemux(fourcc)
+      ? `${fourcc || 'This codec'} has no MP4 form`
+      : pstream.mixedCodecs
+        ? 'The two streams use different codecs'
+        : 'The two streams are different sizes'
   let mode = opts.mode
 
   if (mode === MODE_REMUX && !canRemux(fourcc)) {
@@ -295,13 +373,7 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
   const shown = displaySize(pstream.width, pstream.height, target)
   const pasp = mode === MODE_REMUX ? pixelAspect(pstream.width, pstream.height, reference) : null
 
-  // Encoders reject odd dimensions for 4:2:0 chroma, and the corrected size is
-  // as likely to be odd as any other.
-  const even = (v) => Math.max(2, Math.round(v / 2) * 2)
-  const capHeight = opts.maxHeight > 0 ? Math.min(opts.maxHeight, shown.height) : shown.height
-  const scale = shown.height > 0 ? capHeight / shown.height : 1
-  const outHeight = even(capHeight)
-  const outWidth = even(shown.width * scale)
+  const { width: outWidth, height: outHeight } = outputSize(shown.width, shown.height, opts.maxHeight)
 
   // The rate the level has to cover. A cap is exact; without one the source's
   // own rate is what the encoder will see, measured across the selected range
@@ -315,13 +387,17 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
   return {
     mode,
     copyable,
+    copyBlocker,
     options: opts,
     outFps,
     // The full codec string the encoder will be asked for. It carries a level,
     // and a level that does not cover the output size is refused outright by any
     // encoder that checks -- see the tables above.
     codecString,
-    fileName: suggestName(fileName, startMs, endMs, duration),
+    // The sub stream is named apart from the main one so that exporting both of
+    // them from the same recording does not offer the same filename twice.
+    fileName: suggestName(fileName, startMs, endMs, duration,
+      opts.source === SOURCE_SUB ? 'sub' : ''),
     startMs: mode === MODE_REMUX ? pstream.ts[range.decodeFrom] : startMs,
     requestedStartMs: startMs,
     endMs,
@@ -355,8 +431,9 @@ export function planExport ({ header, index, pstream, audioStarts, fileName, ref
 }
 
 /** A name that says which slice of which recording this is. */
-export function suggestName (fileName, startMs, endMs, duration) {
-  const base = String(fileName || 'export').replace(/\.[^.]*$/, '')
+export function suggestName (fileName, startMs, endMs, duration, suffix = '') {
+  const stem = String(fileName || 'export').replace(/\.[^.]*$/, '')
+  const base = suffix ? `${stem}.${suffix}` : stem
   const whole = startMs <= 0 && endMs >= duration - 1
   if (whole) return `${base}.mp4`
   const stamp = (ms) => {
