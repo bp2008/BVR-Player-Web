@@ -298,37 +298,24 @@ export default {
     }
   },
   watch: {
-    /** Anything that changes what the row has to hold changes whether it fits. */
-    rowContents () { this.scheduleVolumeFit() }
+    /**
+     * Anything that changes what the row has to hold changes whether it fits.
+     * After the render that the change causes, not before it, and in the same
+     * microtask checkpoint so the answer is still in front of the paint.
+     */
+    rowContents () { this.$nextTick(this.measureVolumeFit) }
   },
   mounted () {
     if (typeof ResizeObserver === 'function') {
-      this._ro = new ResizeObserver(() => this.scheduleVolumeFit())
+      this._ro = new ResizeObserver(() => this.measureVolumeFit())
       this._ro.observe(this.$refs.row)
     }
     this.measureVolumeFit()
   },
   beforeUnmount () {
     if (this._ro) this._ro.disconnect()
-    if (this._fitFrame) cancelAnimationFrame(this._fitFrame)
   },
   methods: {
-    /**
-     * Coalesces measurement into the next frame.
-     *
-     * The measurement itself changes the layout it is measuring, so the observer
-     * that triggered it will fire again; deferring keeps that to one extra pass
-     * and out of the observer's own callback. It settles because the answer does
-     * not depend on the state it is asked from -- both states are measured every
-     * time -- so the second pass agrees with the first and changes nothing.
-     */
-    scheduleVolumeFit () {
-      if (this._fitFrame) return
-      this._fitFrame = requestAnimationFrame(() => {
-        this._fitFrame = 0
-        this.measureVolumeFit()
-      })
-    },
     /**
      * Whether the wide volume slider costs the row a line.
      *
@@ -337,6 +324,22 @@ export default {
      * answer. `<=` rather than `===` is deliberate: the slider is shown whenever
      * it is free, including on a row that has already wrapped for other reasons
      * and has slack on one of its lines.
+     *
+     * Called straight from the resize observer rather than out of a frame
+     * callback, and that is the whole of it: an observer runs inside the frame
+     * that resized, after its layout and before its paint, so the class this
+     * settles on is the one that frame is drawn with. Handing the work to the
+     * *next* frame instead -- which is what this used to do, to keep the
+     * re-entrant pass out of the observer's callback -- paints one frame of the
+     * old arrangement at the new width every time the row crosses the point
+     * where the slider stops fitting, which reads as the bar flicking an extra
+     * line deep as you drag the window edge past it.
+     *
+     * The re-entrant pass it was avoiding is harmless: flipping the class
+     * resizes the row, so the observer fires once more in the same frame, and
+     * that pass measures both arrangements exactly as this one did, agrees with
+     * it, and changes nothing. The loop is two deep and terminates because the
+     * answer does not depend on the state it is asked from.
      */
     measureVolumeFit () {
       const row = this.$refs.row
