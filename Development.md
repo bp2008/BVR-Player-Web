@@ -17,8 +17,8 @@ BVR-Player-Web. For what the app is and how to drive it, see
 
 The skip interval (default 10 s), whether a recording starts playing when it is
 opened (it does), time display (elapsed or wall clock), loop, playback speed,
-whether the controls stay on screen rather than fading out,
-overlay drawing, whether scrubbing decodes the exact frame rather than the
+whether the controls stay on screen rather than fading out, whether the
+main-stream jump buttons are shown, overlay drawing, whether scrubbing decodes the exact frame rather than the
 nearest key frame (it does), whether playback pauses while you seek, and — for dual-stream
 recordings — the main/sub stream selection and whether the two are shown in the
 same shape, all live in the settings panel and persist in the web browser's
@@ -70,6 +70,70 @@ chrome back at once — the timer that hid it has already run and there is nothi
 left to cancel — so the setting is watched, and both directions go through
 `wakeUi()`: on, it reappears and no new timer is armed; off, the fade starts
 again without waiting for the next pointer move.
+
+#### Fitting the row, and the size of what is in it
+
+There is never enough width for a transport, a readout, two pickers and half a
+dozen toggles on a phone. The bar used to answer that with a stack of media
+queries, each dropping whichever control was least missed at the next breakpoint
+down — the frame counter, then the speed chip, then the stream chip, then every
+chip there was. A viewer on a narrow window ended up with no speed control at
+all, and no way to know one existed.
+
+The row wraps instead. Everything stays on it and the bar grows a line when it
+has to. The controls that belong at the far end are one group with `margin-left:
+auto`, so they sit right-aligned at the end of the first line when they fit there
+and right-aligned on their own line when they do not, rather than scattering.
+
+Heights come from the same flex layout. Every control asks for its natural height
+through `min-height` rather than fixing one, and the row stretches its items; the
+tallest control on a line — the play button, at 44px — therefore sets that line's
+height and every other control on it fills that height. Each is a centring flex
+container in its own right, so the extra height goes above and below the icon
+instead of into it. The clickable area of everything on a line is as tall as the
+line, and nothing moves to achieve it.
+
+The chips are the exception that proves the pattern: a pill 44px tall would look
+absurd, so what stretches is a bare button (`.ctl-hit`) and the pill is a span
+centred inside it. Hover and the focus ring are drawn on the pill, which is what
+the eye reads as the control; the hit area is simply bigger than it looks.
+
+#### The volume slider, and why it is never animated
+
+The wide slider used to grow sideways out of the speaker button on hover. On a
+row with width to spare that was fine. On a row without, it was a trap: the
+slider appearing rewrapped the bar, the rewrap moved the button out from under
+the pointer, the pointer no longer being on the button collapsed the slider
+again, and the bar rewrapped back — a loop that ran for as long as the pointer
+stayed where it was.
+
+So the slider is now either laid out or not, with nothing in between and no
+transition, and it is laid out only where it is free. Free is measured rather
+than guessed at from a breakpoint: the control bar lays the row out both ways and
+compares the heights, and the slider is shown when having it costs no extra line.
+Both measurements happen in one task, before anything is painted, so what reaches
+the screen is only ever the answer. The test is `<=`, not `==`, so a row that has
+already wrapped for other reasons still gets the slider if one of its lines has
+78px going spare.
+
+The measurement is driven by a `ResizeObserver` on the row, plus a watch on a
+string of everything that changes what the row has to hold — a chip appearing,
+the panel buttons, the readout gaining a digit. Re-measuring on every render
+instead would mean three forced layouts per frame of playback for a row that has
+not changed. The observer's callback schedules the measurement a frame later
+rather than doing it inline, and the measurement settles because it does not
+depend on the state it is asked from: both arrangements are measured every time,
+so the pass triggered by a change agrees with the one that caused it.
+
+Where the slider is not laid out, hovering or clicking the speaker button opens
+the vertical pop-out instead — absolutely positioned, and so incapable of moving
+anything. It carries the volume as a number and a mute toggle, since the button
+that normally carries mute is now the one that opens this. Hover only counts for
+a mouse; a tap synthesises the same event and would open the pop-out only for the
+click behind it to close it again. It closes on Escape, on a click outside, or a
+sixth of a second after the pointer leaves — with a hover bridge across the gap
+between the button and the panel, so travelling from one to the other does not
+count as leaving.
 
 ### Seeking and scrubbing
 
@@ -156,6 +220,30 @@ stretches with neither are darkened; hovering names which it is. Nothing assumes
 the main stream is the sparser of the two, so a recording whose *sub* stream
 dropped out reads correctly the other way round. On the ordinary recording whose
 streams cover the same hour, the banding is not drawn at all.
+
+#### Jumping between main-stream stretches
+
+**Main-stream jump buttons**, off by default in the settings panel, adds a pair
+of buttons either side of the transport that move the playhead to the moments
+the main stream starts up. They land on exactly the left edges of the light bands
+the scrub bar already draws, which is the point of them: on a motion-triggered
+recording those bands are where anything happened, and finding the next one
+otherwise means dragging an hour-long scrub bar past a few pixels of light.
+
+The starts are read from the same coverage intervals as the banding, so the two
+cannot disagree. A first island within a second of the beginning is not counted:
+a recording that simply opens on the main stream is not transitioning into it,
+and <kbd>Home</kbd> already goes there. That rule is also what makes the buttons
+dead on the two shapes of recording with nowhere to jump — one covered end to end
+by the main stream, and one with no main stream at all — and dead is what they
+are, rather than hidden, so the pair does not appear and disappear between files.
+Each button says in its tooltip which of the three things is true: where it would
+go, that there is nothing further that way, or that this recording has no
+main-stream starts at all.
+
+Off by default because most recordings do not have the shape it is for. On a file
+whose streams cover the same hour the buttons would sit there permanently dead,
+and a control that is always dead is worse than one that is absent.
 
 An `auto` sequence that really is built from two streams cannot be copied into
 an MP4 — one track holds one codec, and one resolution — so exporting it

@@ -25,6 +25,12 @@ export const DEFAULT_SETTINGS = {
   // turned off and the chrome pinned open for good.
   alwaysShowControls: false,
 
+  // A pair of buttons that jump between the moments the main stream starts up.
+  // Off by default: on most recordings the two streams cover the same hour and
+  // the buttons would sit there permanently dead, and the ones they do suit are
+  // a shape of file the viewer has to know they have. See coverage.js.
+  mainStreamJumps: false,
+
   // Scrubbing. Exact frames while dragging are on: the picture under the pointer
   // is the one a drag is looking for, and on the recordings this player is for --
   // a few seconds between key frames -- decoding up to it keeps up. It is the

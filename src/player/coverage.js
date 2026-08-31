@@ -106,6 +106,48 @@ export function coverageOf (s, fallbackMs) {
   return out
 }
 
+// How far into a recording the main stream may start and still count as simply
+// how the recording opens rather than as a transition into it. Comfortably under
+// `MIN_GAP_MS`, so it can never swallow a genuine second island.
+const LEAD_IN_MS = 1000
+
+/**
+ * The moments the main stream starts up, for navigating between them.
+ *
+ * These are the left edges of the light bands on the scrub bar, which is the
+ * whole point: the buttons land exactly where the viewer can already see the
+ * better picture begins. A file whose main stream simply runs from the top is
+ * not transitioning into anything, so a first island inside `LEAD_IN_MS` of the
+ * start is not one of these -- which is also what leaves the buttons dead for
+ * the two shapes of recording that have nowhere to jump: one covered end to end
+ * by the main stream, and one with no main stream at all.
+ */
+export function mainStartPoints (coverage) {
+  if (!coverage || !coverage.main) return []
+  const out = []
+  for (const iv of coverage.main) {
+    if (iv.start > LEAD_IN_MS) out.push(iv.start)
+  }
+  return out
+}
+
+/**
+ * The nearest main-stream start on one side of `t`, or `null` for none.
+ *
+ * `EDGE_MS` is what makes a run of backward presses walk the list instead of
+ * sticking: landing on a start puts the playhead a frame or two past it, and
+ * without the margin the same start would answer again for ever.
+ */
+export function adjacentMainStart (points, t, dir) {
+  const EDGE_MS = 250
+  if (dir < 0) {
+    for (let i = points.length - 1; i >= 0; i--) if (points[i] < t - EDGE_MS) return points[i]
+    return null
+  }
+  for (const p of points) if (p > t + EDGE_MS) return p
+  return null
+}
+
 /** Whether `t` falls inside any of a coverage list's intervals. */
 export function covers (list, t) {
   if (!list) return false

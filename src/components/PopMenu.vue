@@ -1,18 +1,21 @@
 <template>
   <div class="popmenu" @keydown.esc.stop="close">
+    <!-- The pill is a span inside a full-height button: the chrome a chip wants
+         to be is small, and the area a finger wants to hit is the whole row. -->
     <button
       ref="button"
       type="button"
-      class="chip chip--button"
-      :class="{ 'chip--open': open, 'chip--on': active }"
+      class="ctl-hit"
       :title="title"
       aria-haspopup="true"
       :aria-expanded="open ? 'true' : 'false'"
       @click="toggle"
       @dblclick.stop
     >
-      <span class="chip__text">{{ chip }}</span>
-      <AppIcon class="chip__caret" name="caretUp" :size="13" />
+      <span class="chip chip--button" :class="{ 'chip--open': open, 'chip--on': active }">
+        <span class="chip__text">{{ chip }}</span>
+        <AppIcon class="chip__caret" name="caretUp" :size="13" />
+      </span>
     </button>
 
     <div v-if="open" class="popmenu__panel" role="menu" :aria-label="label">
@@ -108,7 +111,7 @@ export default {
   transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
 
-.chip--button:hover,
+.ctl-hit:hover .chip--button,
 .chip--open {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.32);
@@ -118,11 +121,6 @@ export default {
 .chip--on {
   border-color: rgba(88, 166, 255, 0.5);
   color: var(--accent);
-}
-
-.chip--button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 .chip__caret {

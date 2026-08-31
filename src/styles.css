@@ -338,6 +338,11 @@ body {
 
 /* --------------------------------------------------------------- buttons */
 
+/* `min-height` rather than `height`: inside a row that stretches its items --
+   the control bar -- this is the height the button asks for, and it then grows
+   to whatever the tallest control on its line needs, keeping its icon centred
+   because it is a centring flex container itself. Anywhere else it is simply
+   the height. */
 .ctl-btn {
   display: inline-flex;
   -webkit-user-select: none;
@@ -345,7 +350,7 @@ body {
   align-items: center;
   justify-content: center;
   width: 38px;
-  height: 38px;
+  min-height: 38px;
   padding: 0;
   border: 0;
   border-radius: 9px;
@@ -370,7 +375,7 @@ body {
 
 .ctl-btn--primary {
   width: 44px;
-  height: 44px;
+  min-height: 44px;
 }
 
 .ctl-btn--small {
@@ -386,6 +391,31 @@ body {
 .ctl-btn:focus-visible,
 .btn:focus-visible,
 .seekbar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A bare, full-height button whose only job is to be big enough to hit; what it
+   looks like is the chip inside it. Ringing the chip rather than the hit area
+   keeps the focus outline the size of the thing the eye reads as the control. */
+.ctl-hit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ctl-hit:focus-visible {
+  outline: none;
+}
+
+.ctl-hit:focus-visible > .chip {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -501,7 +531,7 @@ body {
    another as its own root button. */
 .chip {
   padding: 3px 8px;
-  margin-right: 4px;
+  align-self: center;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
@@ -853,6 +883,3 @@ body {
   pointer-events: none;
 }
 
-@media (max-width: 620px) {
-  .chip { display: none; }
-}

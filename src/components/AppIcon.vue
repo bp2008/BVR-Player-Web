@@ -18,6 +18,12 @@ const PATHS = {
   forward: 'M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z',
   stepBack: 'M6 6h2v12H6zm3.5 6l8.5 6V6z',
   stepForward: 'M6 18l8.5-6L6 6v12zM16 6h2v12h-2z',
+  // Jumping between the stretches a recording holds main-stream video for.
+  // Two blocks over an arrow, drawn to echo the light bands the scrub bar puts
+  // over those same stretches -- deliberately not another triangle-and-bar,
+  // which on this row already means "one frame".
+  mainPrev: 'M16 5h4v6h-4V5zM4 5h6v6H4V5zm17 11H7.8v-2.6L2 17l5.8 3.6V18H21v-2z',
+  mainNext: 'M4 5h4v6H4V5zm10 0h6v6h-6V5zM3 16h13.2v-2.6L22 17l-5.8 3.6V18H3v-2z',
   volumeHigh: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
   volumeLow: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z',
   volumeMute: 'M4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73 4.27 3zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zm-2.5 0c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zM12 4L9.91 6.09 12 8.18V4z',

@@ -79,6 +79,21 @@
       />
     </label>
 
+    <label class="spanel__row spanel__row--toggle">
+      <span class="spanel__label">
+        Main-stream jump buttons
+        <em class="spanel__sub">{{ mainJumpSummary }}</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.mainStreamJumps"
+        @change="emitPatch({ mainStreamJumps: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
+    </label>
+
     <h3 class="spanel__h">Seeking</h3>
 
     <label class="spanel__row spanel__row--toggle">
@@ -316,6 +331,7 @@
 <script>
 import { streamOptions } from '../util/streams.js'
 import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
+import { mainStartPoints } from '../player/coverage.js'
 import { SNAPSHOT_FORMATS, canEncodeWebp } from '../player/snapshot.js'
 import { canPickDirectory } from '../library/directory.js'
 import { clearThumbs, countThumbs } from '../library/thumbCache.js'
@@ -362,6 +378,21 @@ export default {
       return this.settings.alwaysShowControls
         ? 'The top bar and control bar stay on screen, over the picture'
         : 'They fade out while the pointer sits still, and come back when it moves'
+    },
+    /**
+     * Says whether the buttons would have anywhere to go in the file that is
+     * open. Worth the specificity: the recordings they suit are a minority, and
+     * a viewer who turns them on and finds them dead has no other way to learn
+     * that this recording is not one of them.
+     */
+    mainJumpSummary () {
+      if (!this.settings.mainStreamJumps) {
+        return 'Skip to where the main stream starts up, for a recording that only holds it in places'
+      }
+      if (this.state.status !== 'ready') return 'Skip to where the main stream starts up'
+      const n = mainStartPoints(this.state.coverage).length
+      if (!n) return 'On, but this recording has no main-stream starts to jump between'
+      return `On; this recording starts the main stream ${n} time${n === 1 ? '' : 's'}`
     },
     /** Says what the setting costs, in the terms that decide it. */
     scrubExactSummary () {
