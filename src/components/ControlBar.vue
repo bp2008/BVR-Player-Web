@@ -367,12 +367,13 @@ export default {
      */
     jumpTitle (dir) {
       const where = dir < 0 ? 'back' : 'forward'
+      const key = dir < 0 ? 'Ctrl+,' : 'Ctrl+.'
       if (!this.mainStarts.length) {
         return `Jump ${where} to where the main stream starts — this recording has none to jump to`
       }
       const target = dir < 0 ? this.prevMainStart : this.nextMainStart
       if (target === null) return `No main-stream start further ${where}`
-      return `Jump ${where} to where the main stream starts (${formatTime(target, false)})`
+      return `Jump ${where} to where the main stream starts, ${formatTime(target, false)} (${key})`
     },
     /** The chrome must stay up while *any* of the popups is open. */
     setMenuOpen (which, open) {

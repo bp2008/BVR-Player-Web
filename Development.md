@@ -245,6 +245,15 @@ Off by default because most recordings do not have the shape it is for. On a fil
 whose streams cover the same hour the buttons would sit there permanently dead,
 and a control that is always dead is worse than one that is absent.
 
+<kbd>Ctrl</kbd>+<kbd>,</kbd> and <kbd>Ctrl</kbd>+<kbd>.</kbd>, or <kbd>Ctrl</kbd>
+with the left and right arrows, do the same jumps from the keyboard, and they do
+them whether or not the buttons are turned on. The setting is about what the
+control row has room for; a shortcut takes no room, and on a recording with no
+main-stream starts it simply does nothing, which is what an unused key already
+does. Ctrl is what keeps <kbd>,</kbd> and <kbd>.</kbd> on frame step and the bare
+arrows on skip — the pairing is deliberate, since a jump between stretches is the
+same motion as those, several minutes at a time instead of a frame or ten seconds.
+
 An `auto` sequence that really is built from two streams cannot be copied into
 an MP4 — one track holds one codec, and one resolution — so exporting it
 re-encodes, and the export panel says to pick main or sub on its own to copy

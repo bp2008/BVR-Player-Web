@@ -282,6 +282,7 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import PanelFrame from './components/PanelFrame.vue'
 import { BvrPlayer, createBlankState, PLAYBACK_RATES } from './player/BvrPlayer.js'
 import { ViewController } from './player/ViewController.js'
+import { adjacentMainStart, mainStartPoints } from './player/coverage.js'
 import {
   canBrowseDirectories, canPickDirectory, directoryPermission, openEntry, writeFileTo
 } from './library/directory.js'
@@ -307,6 +308,15 @@ const SIDES = ['left', 'right']
 // Long enough for the cue's own animation to finish; the element is only kept
 // alive to be animated, so it is dropped a beat afterwards.
 const SNAP_CUE_MS = 700
+
+// Which key, held with Ctrl, jumps which way between main-stream starts. Both
+// pairs are here because neither is obvious on its own: the punctuation sits
+// beside the frame-step keys it borrows, and the arrows are what a hand already
+// on them reaches for.
+const MAIN_JUMP_KEYS = {
+  ',': -1, '<': -1, ArrowLeft: -1,
+  '.': 1, '>': 1, ArrowRight: 1
+}
 
 const blankPanelMap = (value) => Object.fromEntries(PANELS.map((p) => [p.id, value]))
 
@@ -625,6 +635,15 @@ export default {
     onSkip (seconds) { this.player.skip(seconds) },
     onStep (delta) { this.player.stepFrames(delta) },
     onSeek (ms, preview) { this.player.seek(ms, { preview: !!preview }) },
+    /**
+     * The keyboard half of the main-stream jump buttons; coverage.js says what
+     * counts as a start. Silent when there is none that way, exactly as the
+     * button is dead when there is none.
+     */
+    jumpMainStart (dir) {
+      const target = adjacentMainStart(mainStartPoints(this.state.coverage), this.state.currentTime, dir)
+      if (target !== null) this.onSeek(target, false)
+    },
     onScrubbing (on) {
       this.scrubbing = on
       this.player.setScrubbing(on)
@@ -1196,6 +1215,21 @@ export default {
       // Handling that here too would fire the action twice - which reads as the
       // control doing nothing at all. Space never arrives: see onSpaceKey.
       if (el && el.tagName === 'BUTTON' && event.key === 'Enter') return
+
+      // Ctrl + , / . and Ctrl + arrows jump between main-stream starts, ahead of
+      // the modifier guard below and regardless of whether the buttons for them
+      // are turned on: that setting is about what the control row has room for,
+      // not about whether the feature is there. Held with Ctrl so the keys they
+      // borrow -- frame step and skip -- keep their unmodified meaning.
+      if (event.ctrlKey && !event.metaKey && !event.altKey && !this.libraryOpen) {
+        const dir = MAIN_JUMP_KEYS[event.key]
+        if (dir) {
+          this.jumpMainStart(dir)
+          event.preventDefault()
+          this.wakeUi()
+          return
+        }
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
       // The folder browser covers the whole window; only its own Escape applies.

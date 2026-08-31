@@ -315,6 +315,7 @@
       <span><kbd>Space</kbd> play/pause</span>
       <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> skip</span>
       <span><kbd>,</kbd><kbd>.</kbd> frame step</span>
+      <span><kbd>Ctrl</kbd>+<kbd>,</kbd><kbd>.</kbd> main-stream starts</span>
       <span><kbd>[</kbd><kbd>]</kbd> speed</span>
       <span><kbd>M</kbd> mute</span>
       <span><kbd>F</kbd> fullscreen</span>
@@ -387,9 +388,9 @@ export default {
      */
     mainJumpSummary () {
       if (!this.settings.mainStreamJumps) {
-        return 'Skip to where the main stream starts up, for a recording that only holds it in places'
+        return 'Off; Ctrl + , and Ctrl + . still jump to where the main stream starts up'
       }
-      if (this.state.status !== 'ready') return 'Skip to where the main stream starts up'
+      if (this.state.status !== 'ready') return 'Skip to where the main stream starts up (Ctrl + , and Ctrl + .)'
       const n = mainStartPoints(this.state.coverage).length
       if (!n) return 'On, but this recording has no main-stream starts to jump between'
       return `On; this recording starts the main stream ${n} time${n === 1 ? '' : 's'}`
