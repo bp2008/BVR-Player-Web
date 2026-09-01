@@ -1156,10 +1156,20 @@ export class BvrPlayer {
       const target = frameIndexForTime(s, t)
       if (target > this.curIdx) {
         const show = this.video.has(target) ? target : this.video.bestAtOrBefore(target)
+        const past = show > this.curIdx ? -1 : this.video.nextAfter(target)
         if (show > this.curIdx) {
           this._present(show, this.video.get(show))
           this.clock.setHeld(false)
           if (this._state.buffering) this._emit({ buffering: false })
+        } else if (past >= 0) {
+          // Nothing at or before the frame being waited on, but something after
+          // it, so that frame is not coming; see `VideoPipeline.nextAfter`.
+          // Waiting anyway is a stall with no way out of it, because holding the
+          // clock freezes the very time that decides which frame is asked for --
+          // the player would sit on the same absent picture for as long as the
+          // page stayed open. Land on the next picture there actually is.
+          this.seek(s.ts[past])
+          return
         } else if (this.curIdx < s.count - 1) {
           this.clock.setHeld(true)
           if (!this._state.buffering) this._emit({ buffering: true })

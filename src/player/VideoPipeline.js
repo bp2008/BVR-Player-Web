@@ -105,6 +105,10 @@ export class VideoPipeline {
     // anything back. Input only -- see `_feedAhead`.
     this._reorder = this.reorderHint
     this._outIdx = -1
+    // The highest frame handed to a decoder since the last restart. Nothing
+    // fed may be discarded before it has been shown, and only a restart goes
+    // back for it -- see `_keepTo`.
+    this._fedHigh = -1
     this._stallMark = ''
     this._stallSince = 0
   }
@@ -255,7 +259,19 @@ export class VideoPipeline {
     // Outputs lag the feed by the reorder depth, so an allowance running ahead
     // of the slack here would decode pictures only to throw them away and then
     // want them again a frame later.
-    return this.anchorIdx + this.maxAhead + Math.max(4, this._reorder)
+    const top = this.anchorIdx + this.maxAhead + Math.max(4, this._reorder)
+    // ...but never below what has already gone into a decoder. The window
+    // follows the anchor, and the anchor is free to move *backwards*: a frame
+    // step back, a seek that lands inside the buffer, leaving a scrub. Each of
+    // those drops the top of the window by the distance moved, and the feed
+    // does not come back with it -- only a restart rewinds the feed, and a seek
+    // that finds its frame already decoded is exactly the seek that does not
+    // restart. The frames between the new top and the old one have been fed,
+    // will never be fed again, and would be dropped on arrival: a hole a few
+    // frames ahead of wherever the viewer just moved to, which playback reaches
+    // seconds later and waits at for ever. See "Nothing fed is ever discarded"
+    // in Development.md.
+    return top > this._fedHigh ? top : this._fedHigh
   }
 
   /**
@@ -331,6 +347,7 @@ export class VideoPipeline {
     // so this starts from the hint for *this* stream and re-learns from there.
     this._reorder = this.reorderHint
     this._outIdx = -1
+    this._fedHigh = -1
     this._stallMark = ''
     this.epoch++
     this.feedStep = 0
@@ -394,6 +411,27 @@ export class VideoPipeline {
     let best = -1
     for (const k of this.buf.keys()) {
       if (k <= idx && k > best) best = k
+    }
+    return best
+  }
+
+  /**
+   * The lowest buffered index above `idx`, or -1 when there is none.
+   *
+   * A decoder emits pictures in presentation order, so a picture in hand for a
+   * later frame is proof that an absent earlier one is not on its way: it was
+   * skipped over, or dropped, and the feed has long since moved past it. That
+   * makes this the one test that tells "the frame being waited on is never
+   * coming" apart from "the decoder is slow", which otherwise look identical
+   * from outside. The image path is excluded because its decodes run
+   * concurrently and routinely finish out of order, so a later picture there
+   * proves nothing.
+   */
+  nextAfter (idx) {
+    if (this._inFlight > 0) return -1
+    let best = -1
+    for (const k of this.buf.keys()) {
+      if (k > idx && (best < 0 || k < best)) best = k
     }
     return best
   }
@@ -463,6 +501,7 @@ export class VideoPipeline {
     this.feedStep = this._stepOf(k)
     this.runStart = k
     this._outIdx = -1
+    this._fedHigh = -1
   }
 
   pump () {
@@ -551,6 +590,7 @@ export class VideoPipeline {
       } else {
         this._decodeImage(bytes.slice(), idx, epoch, info)
       }
+      if (idx > this._fedHigh) this._fedHigh = idx
       this.feedStep = step + 1
     }
     this._maybeFlush()

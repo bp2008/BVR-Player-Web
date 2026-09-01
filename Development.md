@@ -1072,6 +1072,66 @@ So the window is sized from the sequence's *largest* picture, once, and a
 handful of frames of look-ahead while the sub stream plays is the price. It is
 the price this pipeline has always paid on a switching-mode recording.
 
+### Nothing fed is ever discarded
+
+The section above fixed one way of shrinking the frame window under a feed that
+had already run ahead. There is another, and it took a stall report on a
+switching-mode recording to find it: the window does not only change size, it
+also *moves*, and it moves backwards whenever the anchor does.
+
+Stepping back one frame moves the anchor back one frame. So does a small seek
+that lands inside the buffer, and so does letting go of the scrub bar. None of
+them restarts the decoder — that is the point of keeping frames behind the
+anchor — so the feed pointer stays exactly where it was while the top of the
+window drops by the distance moved. Any frame between the new top and the old
+one has been fed, is thrown away on arrival or trimmed if it had already
+arrived, and will never be fed again. The player reaches it a fraction of a
+second later, finds nothing, holds the clock, and waits for a picture that no
+longer exists anywhere. A held clock never asks for a different frame, so the
+wait is permanent: the buffering chip stays up until the file is reopened.
+
+Whether that costs anything depends on how much slack there is between the feed
+limit (`anchor + maxAhead + reorder`) and the top of the window
+(`anchor + maxAhead + max(4, reorder)`), and on how far the decoder's output
+lags its input. On the recording this was reported against, playing `auto`:
+
+| | picture | reorder allowance | output lag | slack |
+|---|---|---|---|---|
+| main alone | 5120×1440 | 0 — never widened | 0 | 4 frames |
+| auto, in the main run | 5120×1440 | **16** — learned from the sub stream | 0 | **0** |
+
+The main stream's H.265 decoder hands every picture back the moment it is fed
+one, so it never trips the starvation detector and, played on its own, sits at a
+reorder allowance of zero where `max(4, reorder)` leaves four frames of slack —
+enough to absorb a step back, which is why the bug was invisible on `main`. In
+`auto` the allowance is one number for the whole pipeline and the *sub* stream's
+decoder swallows sixteen chunks before its first picture, so the allowance is
+pinned at `MAX_REORDER`. Back inside the main run that allowance buys nothing —
+that decoder needed none of it — but it does move the feed limit up to exactly
+the top of the window. Zero slack, and one press of the step-back key drops one
+decoded frame on the floor.
+
+The fix is the invariant stated directly rather than arithmetically:
+**`_keepTo` never returns less than the highest frame already handed to a
+decoder.** The pipeline tracks that as `_fedHigh`, reset on every restart, and
+floors the window with it. Nothing that has been fed can be discarded before it
+has been shown, which is what the window was always meant to guarantee, and it
+covers every way the window can retreat under the feed rather than the one that
+was reported. It costs no memory in steady state — the feed limit and the window
+top coincide there — and at most `maxBehind` extra frames while the anchor is
+behind where the feed reached, which is bounded because an anchor that moves
+back further than the buffer reaches restarts the decoder anyway.
+
+**And the player no longer waits forever for a picture that is not coming.**
+A decoder emits in presentation order, so a picture in hand for a *later* frame
+proves the absent earlier one was skipped or dropped rather than merely slow —
+the one test that tells a hole apart from a decoder that is behind. Where
+`_loop` finds nothing at or before the frame it wants and something after it, it
+now seeks to that next picture instead of holding the clock. A hole from any
+cause — including a run entered mid-way after a restart, whose leading delta
+frames are skipped on purpose — costs a visible jump of a frame or two rather
+than ending playback.
+
 ### Very large files — not done, on purpose
 
 The design still scans the whole file once on open. Making the index sparse and
