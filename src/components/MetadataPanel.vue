@@ -237,7 +237,7 @@ import AppIcon from './AppIcon.vue'
 import { formatBytes, formatTime, formatUtc } from '../util/format.js'
 import {
   FLAG_ISKEY, FLAG_ISDISCONTINUITY, FLAG_MARK, FLAG_MAINAVAILABLE, FLAG_SUBSTREAM,
-  MASK_FLAG_NAMES, STATE_BIT_NAMES
+  MASK_FLAG_NAMES, STATE_BIT_NAMES, STREAM_MAIN, STREAM_SUB
 } from '../bvr/constants.js'
 import { colorRefToCss, OBJ_GRAPHIC, OBJ_SHAPES, OBJ_TEXT } from '../bvr/metadata.js'
 import { writerVersionText } from '../bvr/parseFileHeader.js'
@@ -260,6 +260,10 @@ export default {
   props: {
     state: { type: Object, required: true },
     context: { type: Object, default: null },
+    // The sequence on screen, which is not the recording: `main`, `sub` and
+    // `auto` each flatten the file into a different frame table, and the frame
+    // index the player publishes counts frames in whichever one is playing.
+    pstream: { type: Object, default: null },
     show: { type: Object, required: true },
     metadataAt: { type: Function, default: null }
   },
@@ -277,7 +281,6 @@ export default {
   },
   computed: {
     header () { return this.context ? this.context.header : null },
-    pstream () { return this.context ? this.context.pstream : null },
     /** The MP4 structure block, or null for a BVR recording. */
     mp4 () { return this.header && this.header.mp4 ? this.header.mp4 : null },
     containerName () { return containerLabel(this.header) },
@@ -432,7 +435,7 @@ export default {
     frame () {
       const s = this.pstream
       const i = this.state.frameIndex
-      if (!s || i >= s.count) {
+      if (!s || i < 0 || i >= s.count) {
         return { ts: 0, utc: 0, size: 0, offset: 0, stream: '', flagText: '', stateText: '', dioText: '' }
       }
       const flags = s.flags[i]
@@ -446,7 +449,7 @@ export default {
         utc: s.utc[i],
         size: s.size[i],
         offset: s.offset[i],
-        stream: (flags & FLAG_SUBSTREAM) ? 'sub' : 'main',
+        stream: this.streamNameFor(i),
         flagText: names.length ? `${names.join(', ')} (0x${flags.toString(16)})` : `0x${flags.toString(16)}`,
         stateText: bitsText(s.state[i], STATE_BIT_NAMES),
         dioText: s.dio[i] ? `0x${s.dio[i].toString(16)}` : 'none'
@@ -459,8 +462,9 @@ export default {
     objects () {
       const s = this.pstream
       const i = this.state.frameIndex
-      const stateBits = s && i < s.count ? s.state[i] : 0
-      const dio = s && i < s.count ? s.dio[i] : 0
+      const has = !!s && i >= 0 && i < s.count
+      const stateBits = has ? s.state[i] : 0
+      const dio = has ? s.dio[i] : 0
       return this.state.overlayList.map((obj) => {
         let whyHidden = ''
         if (obj.stateflags && (stateBits & obj.stateflags) !== obj.stateflags) {
@@ -511,6 +515,24 @@ export default {
     formatBytes,
     formatTime,
     formatUtc,
+    /**
+     * Which of the file's streams a frame of the played sequence came from.
+     *
+     * A merged `auto` sequence records that per frame; a single-stream one is
+     * the same stream throughout and says so once. The frame flag is the last
+     * resort rather than the first: it is the only answer a BVR carries in the
+     * frame itself, but an MP4 sets no stream flags at all, and reading it there
+     * would have every frame of a second video track name the first.
+     */
+    streamNameFor (i) {
+      const s = this.pstream
+      const names = streamNames(this.header, !!this.state.hasMainStream && !!this.state.hasSubStream)
+      let si
+      if (s.srcStream) si = s.srcStream[i]
+      else if (s.sources && s.sources.length === 1) si = s.sources[0]
+      else si = (s.flags[i] & FLAG_SUBSTREAM) ? STREAM_SUB : STREAM_MAIN
+      return names[si] || names[0]
+    },
     async refreshRecord () {
       if (this.tab !== 'frame' || !this.metadataAt || !this.state.hasMetadata) return
       const at = this.state.currentTime

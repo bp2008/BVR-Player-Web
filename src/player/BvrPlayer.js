@@ -347,9 +347,17 @@ export class BvrPlayer {
     this.duration = duration
     this._sizeGaps()
     const { marks, segments } = collectMarkers(this.index)
+    // Where the playhead lands in the *new* sequence. Frame indices only mean
+    // anything against the table they were counted in, and the three modes count
+    // different tables -- an hour of sub stream is seventy thousand frames where
+    // the triggered main stream is six -- so publishing the new frame table
+    // without the index into it would leave everything reading the pair
+    // describing a frame that does not exist.
+    const startIdx = frameIndexForTime(pstream, atTime)
     this._emit({
       duration,
       frameCount: pstream.count,
+      frameIndex: startIdx,
       width: pstream.width,
       height: pstream.height,
       videoLabel: codecInfo.label,
@@ -370,7 +378,7 @@ export class BvrPlayer {
     }
 
     if (!initial) {
-      await this._gotoIndex(frameIndexForTime(pstream, atTime))
+      await this._gotoIndex(startIdx)
       if (wasPlaying) this.play()
     }
   }
@@ -992,9 +1000,6 @@ export class BvrPlayer {
       blob: this.blob,
       header: this.header,
       index: this.index,
-      // The sequence on screen. The metadata panel reports on what is being
-      // watched, so this stays the player's; the export builds its own.
-      pstream: this.pstream,
       fileName: this._state.fileName,
       // The stream the player happens to be showing. Only the export's *initial*
       // choice: it builds its own sequence from there, so which stream gets

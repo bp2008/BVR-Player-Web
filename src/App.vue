@@ -216,6 +216,7 @@
             v-else-if="id === 'metadata'"
             :state="state"
             :context="fileContext"
+            :pstream="playbackStream"
             :show="overlayShow"
             :metadata-at="metadataAt"
             @seek="(ms) => onSeek(ms, false)"
@@ -368,6 +369,11 @@ export default {
       dockHeight: 0,
 
       fileContext: null,
+      // The sequence the player is showing, kept apart from `fileContext`
+      // because the two change at different moments: the context describes the
+      // recording and lasts as long as it is open, while this is rebuilt every
+      // time the stream selection changes.
+      playbackStream: null,
       trim: { start: 0, end: 0 },
 
       // ----------------------------------------------------------- snapshots
@@ -451,6 +457,15 @@ export default {
       this.wakeUi()
       if (status === 'ready') this.onFileReady()
       else if (status !== 'loading') this.closeFilePanels()
+    },
+    // Switching stream builds a whole new frame table -- an hour of continuous
+    // sub stream counts seventy thousand frames where the triggered main stream
+    // counts six -- so the panel that reports on the frame at the playhead has
+    // to be handed the table the published frame index counts in. Left on the
+    // one the file was opened with, it described a frame from the other stream,
+    // or, past its end, no frame at all.
+    'state.streamMode' () {
+      if (this.fileContext) this.playbackStream = this.player.pstream
     },
     // Turning it on has to put the chrome back immediately -- the timer that
     // hid it has already run -- and turning it off should start the fade again
@@ -574,14 +589,25 @@ export default {
       // folder was only ever a consequence of it having been an overlay. Their
       // context is dropped until the new index is built.
       this.fileContext = null
+      this.playbackStream = null
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
     },
+    /**
+     * Hands the panels the recording and the sequence being played.
+     *
+     * Both at once, because a panel opened between the two would read one of
+     * them from the previous file.
+     */
+    adoptFileContext () {
+      this.fileContext = this.player.exportContext()
+      this.playbackStream = this.player.pstream
+    },
     /** Fresh index, fresh trim range, and the context the panels read from. */
     onFileReady () {
       this.trim = { start: 0, end: this.state.duration }
-      this.fileContext = this.player.exportContext()
+      this.adoptFileContext()
       // A speed carried over from the last clip is more surprising than useful,
       // so each file starts at 1x however the last one was left.
       if (this.state.rate !== 1) this.player.setRate(1)
@@ -737,7 +763,7 @@ export default {
       const def = panelDef(id)
       if (!def) return
       if (def.needsFile && this.state.status !== 'ready') return
-      if (def.needsFile && !this.fileContext) this.fileContext = this.player.exportContext()
+      if (def.needsFile && !this.fileContext) this.adoptFileContext()
       if (id === 'export' && this.trim.end <= this.trim.start) {
         this.trim = { start: 0, end: this.state.duration }
       }
@@ -758,6 +784,7 @@ export default {
         if (p.needsFile && this.panelOpen[p.id]) this.closePanel(p.id)
       }
       this.fileContext = null
+      this.playbackStream = null
     },
     /**
      * Marks a panel as the one being worked in.
