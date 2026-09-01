@@ -1,4 +1,4 @@
-import { FLAG_ISKEY } from '../bvr/constants.js'
+import { FLAG_ISKEY, STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 
 // Chunk timestamps are used purely as identity tags: BVR timestamps may repeat
 // within a stream (spec section 5), so the frame index is a safer key. The epoch
@@ -44,6 +44,15 @@ const STALL_GRACE_MS = 150
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
+/** A per-source reorder table, sanitised, with a slot for every source stream. */
+function reorderTable (hints) {
+  const out = []
+  for (const si of [STREAM_MAIN, STREAM_SUB]) {
+    out[si] = clamp(Math.round((hints && hints[si]) || 0), 0, MAX_REORDER)
+  }
+  return out
+}
+
 /**
  * Owns the video decoders and a sliding window of decoded frames.
  *
@@ -61,13 +70,13 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
  * being played, so the window, the anchor and the seek logic are unchanged.
  */
 export class VideoPipeline {
-  constructor ({ reader, onError, reorderHint = 0 }) {
+  constructor ({ reader, onError, reorderHints = null }) {
     this.reader = reader
     this.onError = onError || (() => {})
-    // What this stream's decoder wanted last time it was played, if anything
-    // has played it before. Only ever a starting point -- it is re-learned from
-    // scratch if it turns out to be too little.
-    this.reorderHint = clamp(Math.round(reorderHint) || 0, 0, MAX_REORDER)
+    // What each of the file's streams' decoders wanted last time one of them
+    // was played, indexed by source stream. Only ever a starting point -- each
+    // is re-learned from scratch if it turns out to be too little.
+    this.reorderHints = reorderTable(reorderHints)
 
     this.pstream = null
     this.codecInfo = null
@@ -101,9 +110,9 @@ export class VideoPipeline {
     this._pendingCopies = 0
     this._copyFrames = typeof createImageBitmap === 'function'
     this._flushEpoch = -1
-    // Chunks this stream's decoder has been shown to swallow before it hands
-    // anything back. Input only -- see `_feedAhead`.
-    this._reorder = this.reorderHint
+    // Chunks each stream's decoder has been shown to swallow before it hands
+    // anything back, indexed by source stream. Input only -- see `_feedAhead`.
+    this._reorder = this.reorderHints.slice()
     this._outIdx = -1
     // The highest frame handed to a decoder since the last restart. Nothing
     // fed may be discarded before it has been shown, and only a restart goes
@@ -218,6 +227,20 @@ export class VideoPipeline {
    * guarantees each of those frames has been handed over -- and it never runs
    * further ahead than the stream's own reorder depth requires.
    */
+  /**
+   * The source stream the next chunk belongs to.
+   *
+   * The reorder allowance is a property of a decoder, not of the sequence, so
+   * everything that consults it has to say *whose* decoder it means. While the
+   * feed is inside one stream's run that is the stream being fed; the frame
+   * after a changeover belongs to the other, and the allowance changes with it.
+   */
+  _feedTarget () {
+    const s = this.pstream
+    if (!s || !s.count) return STREAM_MAIN
+    return this.sourceOf(this._seqAt(clamp(this.feedStep, 0, s.count - 1)))
+  }
+
   _feedLimit () {
     const s = this.pstream
     const want = this.anchorIdx + this._feedAhead()
@@ -249,28 +272,47 @@ export class VideoPipeline {
    * against each other anyway, because the picture buffer a decoder is entitled
    * to shrinks as the pictures grow. The deepest reordering belongs to the
    * smallest frames.
+   *
+   * Which is exactly why the allowance is per source stream. An `auto` sequence
+   * runs a decoder per stream and the two want wildly different amounts: on the
+   * recording this was measured against, the 1904x536 sub stream swallows
+   * sixteen chunks before its first picture and the 5120x1440 main stream hands
+   * every picture straight back. One number for both lets the sub stream's
+   * appetite decide how far ahead the *main* stream is read -- twenty of the
+   * most expensive pictures in the file, for a decoder that asked for none of
+   * them. See "One allowance per decoder" in Development.md.
    */
   _feedAhead () {
-    return this.maxAhead + this._reorder
+    return this.maxAhead + (this._reorder[this._feedTarget()] || 0)
   }
 
-  /** The highest index worth keeping a picture for; see `_feedAhead`. */
+  /**
+   * The highest index worth keeping a picture for.
+   *
+   * Everything already handed to a decoder, plus room for the look-ahead still
+   * to be fed. Nothing else can turn up -- a picture exists only because a chunk
+   * was fed -- so `_fedHigh` is both the tight bound and the necessary one.
+   *
+   * Necessary, because the window follows the anchor and the anchor is free to
+   * move *backwards*: a frame step back, a seek that lands inside the buffer,
+   * leaving a scrub. Each of those drops the top of the window by the distance
+   * moved, and the feed does not come back with it -- only a restart rewinds
+   * the feed, and a seek that finds its frame already decoded is exactly the
+   * seek that does not restart. Without the floor, the frames between the new
+   * top and the old one have been fed, will never be fed again, and are dropped
+   * on arrival: a hole a few frames ahead of wherever the viewer just moved to,
+   * which playback reaches a moment later and then waits at for ever.
+   *
+   * Tight, because the slack this used to carry on top of `maxAhead` was only
+   * ever standing in for the feed allowance, and standing in for it badly: it
+   * had to assume the deepest reorder depth anywhere in the pipeline whether or
+   * not the stream on screen wanted it, and on a merged sequence it therefore
+   * sized the window for the small pictures and filled it with the large ones.
+   * See "Nothing fed is ever discarded" and "One allowance per decoder" in
+   * Development.md.
+   */
   _keepTo () {
-    // Outputs lag the feed by the reorder depth, so an allowance running ahead
-    // of the slack here would decode pictures only to throw them away and then
-    // want them again a frame later.
-    const top = this.anchorIdx + this.maxAhead + Math.max(4, this._reorder)
-    // ...but never below what has already gone into a decoder. The window
-    // follows the anchor, and the anchor is free to move *backwards*: a frame
-    // step back, a seek that lands inside the buffer, leaving a scrub. Each of
-    // those drops the top of the window by the distance moved, and the feed
-    // does not come back with it -- only a restart rewinds the feed, and a seek
-    // that finds its frame already decoded is exactly the seek that does not
-    // restart. The frames between the new top and the old one have been fed,
-    // will never be fed again, and would be dropped on arrival: a hole a few
-    // frames ahead of wherever the viewer just moved to, which playback reaches
-    // seconds later and waits at for ever. See "Nothing fed is ever discarded"
-    // in Development.md.
+    const top = this.anchorIdx + this.maxAhead
     return top > this._fedHigh ? top : this._fedHigh
   }
 
@@ -286,7 +328,11 @@ export class VideoPipeline {
   _widenForReorder () {
     if (this.kind !== 'video' || this.closed || !this.configured) return
     if (!this._ready.size) return
-    if (this._reorder >= MAX_REORDER) return
+    // Whichever decoder the feed is stopped in front of is the one being
+    // starved: the stream behind it was drained the moment the feed left it, so
+    // it is not the one holding anything back.
+    const si = this._feedTarget()
+    if ((this._reorder[si] || 0) >= MAX_REORDER) return
     // There is more of the stream to feed, and the allowance is what stopped us.
     if (!this.pstream || this.feedStep >= this.pstream.count) return
     if (this.feedStep <= this._feedLimit()) return
@@ -309,7 +355,7 @@ export class VideoPipeline {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
     if (this._stallMark !== mark) { this._stallMark = mark; this._stallSince = now; return }
     if (now - this._stallSince < STALL_GRACE_MS) return
-    this._reorder = Math.min(MAX_REORDER, this._reorder + REORDER_STEP)
+    this._reorder[si] = Math.min(MAX_REORDER, (this._reorder[si] || 0) + REORDER_STEP)
     this.pump()
   }
 
@@ -343,9 +389,9 @@ export class VideoPipeline {
     // A merged sequence is 'video' if any of its streams is; a decoder is only
     // ever asked for by the frames that need one.
     this.kind = this._codecs().some((c) => c.kind === 'video') ? 'video' : codecInfo.kind
-    // Whatever the last stream's decoder needed says nothing about this one's,
-    // so this starts from the hint for *this* stream and re-learns from there.
-    this._reorder = this.reorderHint
+    // Each stream starts from its own hint and re-learns from there; what one
+    // stream's decoder needed says nothing about the other's.
+    this._reorder = this.reorderHints.slice()
     this._outIdx = -1
     this._fedHigh = -1
     this._stallMark = ''
@@ -438,8 +484,8 @@ export class VideoPipeline {
 
   get bufferedCount () { return this.buf.size }
 
-  /** What this stream's decoder turned out to want, for the next pipeline. */
-  get reorder () { return this._reorder }
+  /** What each stream's decoder turned out to want, for the next pipeline. */
+  get reorder () { return this._reorder.slice() }
 
   setAnchor (idx) {
     this.anchorIdx = idx
@@ -521,18 +567,10 @@ export class VideoPipeline {
 
     while (!this.closed) {
       if (this.feedStep >= s.count) break
-      if (this.feedStep > this._feedLimit()) break
-      // Bound the decoders' outstanding work: queued chunks plus pictures we
-      // have not yet handed back must stay under the output pool size.
-      if (this.kind === 'video') {
-        if (this._queued() + this._pendingCopies >= 6) break
-      } else if (this._inFlight >= 4) break
 
       const step = this.feedStep
       const idx = this._seqAt(step)
       const si = this.sourceOf(idx)
-      const info = this._infoFor(idx)
-      const isKey = !!(s.flags[idx] & FLAG_ISKEY)
 
       // The feed has crossed into the other stream, so the one being left has to
       // be drained. A decoder holds pictures back until enough input has
@@ -541,10 +579,29 @@ export class VideoPipeline {
       // simply never be handed over, and the picture would stall for the length
       // of the decoder's reorder depth at each changeover. The pictures arrive
       // through the ordinary output path, so nothing here waits for them.
+      //
+      // Before the allowance is consulted, not after, because the allowance is
+      // the incoming stream's from this chunk onwards. A changeover into a
+      // decoder that wants less look-ahead than the one being left -- the sub
+      // stream giving way to the main one, on the recording that motivated the
+      // per-stream allowance -- would otherwise stop the feed one chunk short of
+      // the boundary with the outgoing decoder still holding the pictures the
+      // playhead is waiting for, and only a decoder it does not belong to left
+      // to widen.
       if (si !== this._feedSource) {
         this._drain(this._feedSource)
         this._feedSource = si
       }
+
+      if (this.feedStep > this._feedLimit()) break
+      // Bound the decoders' outstanding work: queued chunks plus pictures we
+      // have not yet handed back must stay under the output pool size.
+      if (this.kind === 'video') {
+        if (this._queued() + this._pendingCopies >= 6) break
+      } else if (this._inFlight >= 4) break
+
+      const info = this._infoFor(idx)
+      const isKey = !!(s.flags[idx] & FLAG_ISKEY)
 
       // A stream is entered only on a key frame. After a restart in the middle
       // of one run, the frames of the *other* stream that follow belong to a run

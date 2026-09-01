@@ -178,8 +178,12 @@ export class BvrPlayer {
     this.curIdx = -1
     this.pendingSeek = null
     this.ended = false
-    // Stream mode -> the decoder's reorder depth, learned once per file.
-    this._reorderSeen = new Map()
+    // Source stream -> the reorder depth that stream's decoder turned out to
+    // want, learned once per file. Keyed by the stream and not by the mode
+    // playing it: how much input a decoder swallows follows from the picture it
+    // is decoding, so what the main stream wanted on its own is what it wants
+    // again inside an `auto` sequence.
+    this._reorderSeen = []
 
     // Scrubbing. `scrubTarget` is the position the pointer has reached while the
     // picture for an earlier one is still being decoded; the two settings are
@@ -221,7 +225,7 @@ export class BvrPlayer {
 
     try {
       this.blob = file
-      this._reorderSeen.clear()
+      this._reorderSeen = []
       this.reader = new BlobReader(file)
 
       // One call for both formats; `container/open.js` is the only code left in
@@ -317,13 +321,19 @@ export class BvrPlayer {
     // How much input each stream's decoder wanted, kept across a switch.
     // Working it out costs a fraction of a second of the picture not moving --
     // see VideoPipeline._feedAhead -- and paying that again every time someone
-    // compares the two streams is exactly the sort of thing to remember.
-    if (this.video && this.pstream) this._reorderSeen.set(this.pstream.mode, this.video.reorder)
-    if (this.video) this.video.close()
+    // compares the two streams is exactly the sort of thing to remember. The
+    // deepest reading wins, since the allowance is only ever too small.
+    if (this.video) {
+      const seen = this.video.reorder
+      for (let si = 0; si < seen.length; si++) {
+        if (seen[si] > (this._reorderSeen[si] || 0)) this._reorderSeen[si] = seen[si]
+      }
+      this.video.close()
+    }
     this.video = new VideoPipeline({
       reader: this.reader,
       onError: (e) => this._onPipelineError(e),
-      reorderHint: this._reorderSeen.get(pstream.mode) || 0
+      reorderHints: this._reorderSeen
     })
     await this.video.open(pstream, codecInfo)
 
@@ -896,7 +906,14 @@ export class BvrPlayer {
     if (!this.pstream) return
     this.pause()
     const s = this.pstream
-    const from = this.curIdx >= 0 ? this.curIdx : frameIndexForTime(s, this.clock.currentTime)
+    // A seek still being decoded counts from where it was going, not from the
+    // last picture that made it to the screen. Stepping a frame straight after
+    // clicking the scrub bar is an ordinary thing to do, and on a stream slow
+    // enough that the click has not landed yet, `curIdx` is still wherever
+    // playback left off -- which could be minutes away.
+    const from = this.pendingSeek != null ? this.pendingSeek
+      : this.curIdx >= 0 ? this.curIdx
+        : frameIndexForTime(s, this.clock.currentTime)
     await this._gotoIndex(clamp(from + delta, 0, s.count - 1))
   }
 

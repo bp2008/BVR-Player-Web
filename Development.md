@@ -995,10 +995,13 @@ Two details matter more than they look:
   the reading has to hold still for 150 ms, with any picture arriving counting as
   movement. Without that the allowance grew on healthy files too.
 
-What a stream's decoder turned out to want is remembered per stream for as long
-as the file is open, so switching between main and sub does not pay for the
-discovery twice. It looked like the decoder was being left dirty by a switch; it
-was the measurement being thrown away with the old pipeline.
+What a decoder turned out to want is remembered for as long as the file is open,
+keyed by the *source stream* rather than by the mode playing it — how much input
+a decoder swallows follows from the picture it is decoding, so what the main
+stream wanted on its own is what it wants again inside an `auto` sequence.
+Switching between main, sub and auto therefore never pays for the discovery
+twice. It looked like the decoder was being left dirty by a switch; it was the
+measurement being thrown away with the old pipeline.
 
 ### Decode order is a permutation, not a second timeline
 
@@ -1090,9 +1093,9 @@ second later, finds nothing, holds the clock, and waits for a picture that no
 longer exists anywhere. A held clock never asks for a different frame, so the
 wait is permanent: the buffering chip stays up until the file is reopened.
 
-Whether that costs anything depends on how much slack there is between the feed
-limit (`anchor + maxAhead + reorder`) and the top of the window
-(`anchor + maxAhead + max(4, reorder)`), and on how far the decoder's output
+Whether that costs anything depended on how much slack there was between the
+feed limit (`anchor + maxAhead + reorder`) and what the top of the window then
+was (`anchor + maxAhead + max(4, reorder)`), and on how far the decoder's output
 lags its input. On the recording this was reported against, playing `auto`:
 
 | | picture | reorder allowance | output lag | slack |
@@ -1122,6 +1125,13 @@ top coincide there — and at most `maxBehind` extra frames while the anchor is
 behind where the feed reached, which is bounded because an anchor that moves
 back further than the buffer reaches restarts the decoder anyway.
 
+The `max(4, reorder)` slack went with it. A picture exists only because a chunk
+was fed, so `_fedHigh` is the tight bound as well as the necessary one, and the
+old term was only ever standing in for the feed allowance — badly, since it had
+to assume the deepest reorder depth anywhere in the pipeline whether or not the
+stream on screen wanted it. `_keepTo` is now `max(anchor + maxAhead, _fedHigh)`
+and the window is back inside the budget it is sized from.
+
 **And the player no longer waits forever for a picture that is not coming.**
 A decoder emits in presentation order, so a picture in hand for a *later* frame
 proves the absent earlier one was skipped or dropped rather than merely slow —
@@ -1131,6 +1141,53 @@ now seeks to that next picture instead of holding the clock. A hole from any
 cause — including a run entered mid-way after a restart, whose leading delta
 frames are skipped on purpose — costs a visible jump of a frame or two rather
 than ending playback.
+
+### One allowance per decoder
+
+The reorder allowance above used to be one number for the whole pipeline. An
+`auto` sequence runs a decoder per source stream, and the two want wildly
+different amounts of input — that is the entire premise of the measurement — so
+one number meant every decoder was fed to the appetite of the hungriest.
+
+On the switching-mode recording that produced the stall report:
+
+| stream | picture | chunks in before the first picture out |
+|---|---|---|
+| sub, hardware H.264 | 1904×536 | **16** |
+| main, hardware H.265 | 5120×1440 | **0** — every picture handed straight back |
+
+The window is sized from the sequence's largest picture, so `maxAhead` is four.
+Playing the sub run taught the pipeline an allowance of sixteen, and that
+allowance was then applied inside the main run, where the feed ran twenty frames
+ahead of the anchor for a decoder that had asked for none of it. Twenty-three
+5120×1440 pictures, held as RGBA-backed bitmaps: **678 MB against a
+192 MB budget**, of the most expensive pictures in the file. It was also what
+removed the last of the slack that had been quietly absorbing a step back.
+
+So the allowance is per source stream, learned per stream, and consulted for the
+stream the feed is about to hand a chunk to. Measured on the same recording,
+same machine, same clip:
+
+| | before | after |
+|---|---|---|
+| in the sub run | 20 frames, 79 MB | 20 frames, 79 MB |
+| in the main run | 23 frames, **678 MB** | 7 frames, **197 MB** |
+
+The main run is now the six-frame window the memory budget actually asked for,
+and the sub run keeps the deep look-ahead its decoder needs, because those
+frames are a tenth of the area and cost almost nothing to hold. It is the same
+observation the allowance was built on — **the deepest reordering belongs to the
+smallest frames** — finally applied per stream instead of per pipeline.
+
+One ordering detail carries the whole thing. The changeover drain
+(`_drain`, which flushes the decoder the feed is leaving) now runs *before* the
+allowance is consulted rather than after. Crossing into a decoder that wants
+less look-ahead than the one being left — sub giving way to main, here — would
+otherwise stop the feed one chunk short of the boundary, with the outgoing
+decoder still holding the sixteen pictures the playhead is walking towards and
+nothing but the incoming decoder's allowance left to widen. The feed would
+recover by inflating the wrong decoder, at every changeover, which is the bug
+this section is about wearing a different hat.
 
 ### Very large files — not done, on purpose
 
