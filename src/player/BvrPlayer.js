@@ -13,7 +13,7 @@ import { Renderer } from './Renderer.js'
 import { paintOverlay } from './overlayPainter.js'
 import { snapshotOverlay } from '../bvr/metadata.js'
 import { audioCodecLabel } from './audioCodecs.js'
-import { streamLabelFor } from '../container/mediaInfo.js'
+import { describeNoVideo, streamLabelFor } from '../container/mediaInfo.js'
 import { STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
@@ -255,7 +255,10 @@ export class BvrPlayer {
       this._emitProbe()
 
       if (this.index.streams[0].count === 0 && this.index.streams[1].count === 0) {
-        throw new Error('This file contains no video frames.')
+        // Not just "no video frames": the file is plainly not empty, so the
+        // message says what it does hold and points at the report that says the
+        // rest. See describeNoVideo.
+        throw new Error(describeNoVideo(this.header, this.index))
       }
       if (!this.probe.anySupported) throw new Error(this.probe.summary)
 
@@ -1004,6 +1007,25 @@ export class BvrPlayer {
       frameIndex: idx,
       timeMs: s ? s.ts[idx] : this._state.currentTime,
       utcMs: s && s.utc ? s.utc[idx] : 0
+    }
+  }
+
+  /**
+   * What the metadata report needs from a file that is already open: the three
+   * objects the container reader produced, and the blob they describe.
+   *
+   * Null once nothing is open, which includes every failed open -- the report is
+   * most wanted exactly then, so it reads the file again for itself rather than
+   * this holding a half-opened file alive on the chance somebody asks.
+   */
+  metadataContext () {
+    if (!this.blob || !this.header || !this.index) return null
+    return {
+      blob: this.blob,
+      fileName: this._state.fileName,
+      header: this.header,
+      index: this.index,
+      probe: this.probe
     }
   }
 

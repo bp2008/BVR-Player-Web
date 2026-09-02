@@ -15,6 +15,7 @@
  */
 
 import { parseBvrName } from '../library/bvrName.js'
+import { downloadBlob } from '../util/download.js'
 
 export const SNAPSHOT_FORMATS = [
   { value: 'jpeg', label: 'JPEG', mime: 'image/jpeg', ext: 'jpg' },
@@ -149,14 +150,7 @@ export function snapshotName ({ fileName, utcMs, timeMs, frameIndex }, ext = 'jp
 
 /** Hands a still to the browser's downloader. */
 export function downloadSnapshot (blob, name) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  // Revoking immediately can cut a download off in some builds; a still is small
-  // enough that a short grace period is plenty.
-  setTimeout(() => URL.revokeObjectURL(url), 20000)
+  // A still is small enough that a short grace period before the revoke is
+  // plenty.
+  downloadBlob(blob, name, 20000)
 }

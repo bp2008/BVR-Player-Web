@@ -98,7 +98,21 @@
             <AppIcon name="alert" :size="34" />
             <p class="overlay__title">Could not play this file</p>
             <p class="overlay__sub overlay__sub--wrap">{{ state.error }}</p>
-            <button type="button" class="btn" @click.stop="pickFile">Choose another file</button>
+            <!-- A file the player refuses is the file somebody most needs
+                 described. Reading it again costs a scan, hence the progress. -->
+            <div class="overlay__buttons">
+              <button
+                v-if="lastFile"
+                type="button"
+                class="btn"
+                :disabled="analyzing"
+                @click.stop="exportMetadata"
+              >
+                <AppIcon name="download" :size="16" />
+                <span>{{ analyzing ? analyzeLabel : 'Export metadata' }}</span>
+              </button>
+              <button type="button" class="btn" @click.stop="pickFile">Choose another file</button>
+            </div>
           </div>
         </div>
 
@@ -219,8 +233,10 @@
             :pstream="playbackStream"
             :show="overlayShow"
             :metadata-at="metadataAt"
+            :analyzing="analyzing"
             @seek="(ms) => onSeek(ms, false)"
             @overlay="onOverlay"
+            @analyze="exportMetadata"
           />
           <ExportPanel
             v-else
@@ -289,6 +305,8 @@ import {
 } from './library/directory.js'
 import { loadDirectoryHandle } from './library/thumbCache.js'
 import { downloadSnapshot, encodeSnapshot, snapshotName } from './player/snapshot.js'
+import { analyzeRecording } from './container/analyze.js'
+import { downloadBlob } from './util/download.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { formatBytes } from './util/format.js'
 import { acceptsTypedText, isSpaceKey } from './util/keys.js'
@@ -369,6 +387,11 @@ export default {
       dockHeight: 0,
 
       fileContext: null,
+      // The file last handed to the player, kept because "Export metadata" has
+      // to work after a failed open, when the player is holding nothing.
+      lastFile: null,
+      analyzing: false,
+      analyzeProgress: 0,
       // The sequence the player is showing, kept apart from `fileContext`
       // because the two change at different moments: the context describes the
       // recording and lasts as long as it is open, while this is rebuilt every
@@ -390,6 +413,12 @@ export default {
     }
   },
   computed: {
+    /** Progress only means something on the path that re-reads the file. */
+    analyzeLabel () {
+      return this.analyzeProgress > 0 && this.analyzeProgress < 1
+        ? `Reading... ${(this.analyzeProgress * 100).toFixed(0)}%`
+        : 'Reading the file...'
+    },
     hasFile () {
       return this.state.status === 'ready' || this.state.status === 'loading' || this.state.status === 'error'
     },
@@ -590,6 +619,7 @@ export default {
       // context is dropped until the new index is built.
       this.fileContext = null
       this.playbackStream = null
+      this.lastFile = file
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
@@ -1014,6 +1044,42 @@ export default {
         this.showNotice(`The snapshot could not be saved: ${why}`)
       }
     },
+    /**
+     * Writes the metadata report and hands it to the browser's downloader.
+     *
+     * Two routes in, and they differ only in cost. With a file open the report
+     * is built from the header, index and probe already in memory and appears at
+     * once. After a failed open there is nothing in memory -- the player drops
+     * everything when an open throws -- so the file is read again from the blob
+     * the last open was given, and that scan is what the progress counts.
+     */
+    async exportMetadata () {
+      if (this.analyzing) return
+      const context = this.player.metadataContext()
+      const file = context ? context.blob : this.lastFile
+      if (!file) {
+        this.showNotice('There is no file open to describe.')
+        return
+      }
+      this.analyzing = true
+      this.analyzeProgress = context ? 1 : 0
+      try {
+        const report = await analyzeRecording(file, {
+          ...(context || {}),
+          fileName: (context && context.fileName) || this.state.fileName || file.name,
+          onProgress: (p) => { this.analyzeProgress = p }
+        })
+        downloadBlob(new Blob([report.text], { type: 'text/plain;charset=utf-8' }), report.name)
+        this.showNotice(`Saved ${report.name}.`)
+      } catch (e) {
+        const why = e && e.message ? e.message : String(e)
+        this.showNotice(`The metadata report could not be written: ${why}`)
+      } finally {
+        this.analyzing = false
+        this.analyzeProgress = 0
+      }
+    },
+
     /** A cue per still, each with a life of its own. */
     flashSnapshot () {
       const id = ++this.snapCueSeq
@@ -1304,8 +1370,7 @@ export default {
           break
         case 'i':
         case 'I':
-          if (this.state.hasMetadata) this.togglePanel('metadata'); else handled = false
-          break
+          this.togglePanel('metadata'); break
         case 'e':
         case 'E':
           this.togglePanel('export'); break

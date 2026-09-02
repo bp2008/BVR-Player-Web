@@ -226,13 +226,17 @@ export default {
   },
   computed: {
     /**
-     * One toggle per panel, in the order the dock knows them. Metadata is
-     * dropped for a recording that has none rather than shown disabled -- there
-     * is nothing the viewer could do about it.
+     * One toggle per panel, in the order the dock knows them.
+     *
+     * Metadata used to be dropped for a recording that carried none, on the
+     * grounds that there was nothing to show. That stopped being true: the panel
+     * describes the file, the stream shapes and the frame under the playhead
+     * whether or not any overlay object was ever defined, and it is where a
+     * recording is exported as a report. An MP4, which never has overlay
+     * metadata, would otherwise have no way to reach any of that.
      */
     panelButtons () {
       return PANELS
-        .filter((p) => p.id !== 'metadata' || this.state.hasMetadata)
         .map((p) => {
           const key = PANEL_KEYS[p.id]
           return {

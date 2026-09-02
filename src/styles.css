@@ -656,6 +656,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Two buttons under a refusal: describe the file, or open a different one. */
+.overlay__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
 /* Codec trouble found by the opening probe, shown while indexing carries on. */
 .overlay__warn {
   display: flex;

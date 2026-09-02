@@ -61,11 +61,16 @@ export async function sniffContainer (reader) {
  * should be told so in the first moment rather than after a gigabyte has gone
  * past. An MP4 reaches the same point almost immediately, but reports through
  * the same channel so the player has one path.
+ *
+ * `tolerant` turns off the one refusal this function makes -- a file whose
+ * codecs this device cannot decode. The metadata report asks for that: there an
+ * undecodable stream is a line to print rather than a reason to stop, and a
+ * report is wanted precisely when a file will not play.
  */
-export async function openContainer (reader, { onProbe, onProgress, shouldStop } = {}) {
+export async function openContainer (reader, { onProbe, onProgress, shouldStop, tolerant = false } = {}) {
   const kind = await sniffContainer(reader)
   if (kind === 'mp4') return openMp4Container(reader, { onProbe, onProgress, shouldStop })
-  if (kind === 'bvr') return openBvrContainer(reader, { onProbe, onProgress, shouldStop })
+  if (kind === 'bvr') return openBvrContainer(reader, { onProbe, onProgress, shouldStop, tolerant })
   throw new UnknownContainerError(
     'This is not a file the player recognises. It reads Blue Iris .bvr recordings ' +
     'and MP4 video (.mp4, .m4v, .mov).'
@@ -78,7 +83,7 @@ async function openMp4Container (reader, { onProbe, onProgress, shouldStop }) {
   return { container: 'mp4', header, index, probe, movie }
 }
 
-async function openBvrContainer (reader, { onProbe, onProgress, shouldStop }) {
+async function openBvrContainer (reader, { onProbe, onProgress, shouldStop, tolerant }) {
   const header = await parseFileHeader(reader)
   header.container = 'bvr'
   // BVR carries no audio configuration beyond its WAVEFORMATEX, so the field the
@@ -88,7 +93,7 @@ async function openBvrContainer (reader, { onProbe, onProgress, shouldStop }) {
   let probe = await probeVideoStreams(reader, header)
   if (onProbe) onProbe(probe, header)
   if (shouldStop && shouldStop()) return { container: 'bvr', header, index: null, probe }
-  if (probe.decided && !probe.anySupported) throw new Error(probe.summary)
+  if (!tolerant && probe.decided && !probe.anySupported) throw new Error(probe.summary)
 
   const index = await buildIndex(reader, header, { onProgress, shouldStop })
   index.container = 'bvr'

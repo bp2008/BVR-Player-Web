@@ -37,6 +37,7 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Browse a folder | Browse button | <kbd>L</kbd>, or <kbd>Esc</kbd> |
 | Save a snapshot | camera button | <kbd>S</kbd> |
 | Metadata inspector | layers button | <kbd>I</kbd> |
+| Export metadata as a text report | **Export metadata**, in the metadata panel | |
 | Export to MP4 | download button | <kbd>E</kbd> |
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |

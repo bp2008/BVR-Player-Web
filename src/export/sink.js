@@ -11,6 +11,8 @@
  * remains for `file://` and for browsers without it.
  */
 
+import { downloadBlob } from '../util/download.js'
+
 export function canStreamToDisk () {
   return typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function'
 }
@@ -121,15 +123,7 @@ export async function openOutput (fileName) {
  */
 export function deliver (sink) {
   if (!sink || sink.streaming || !sink.blob) return false
-  const url = URL.createObjectURL(sink.blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = sink.name
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  // Revoking immediately can cut the download off in some builds; one turn of
-  // the event loop is enough for the navigation to have taken the blob.
-  setTimeout(() => URL.revokeObjectURL(url), 60000)
+  // An export can be gigabytes, so the URL is held far longer than a still's.
+  downloadBlob(sink.blob, sink.name, 60000)
   return true
 }

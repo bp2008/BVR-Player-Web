@@ -121,3 +121,48 @@ export function streamLabelFor (container, si, both) {
   if (container === 'mp4') return both ? `Video ${si + 1}` : 'Video'
   return si === 1 ? 'Sub stream' : 'Main stream'
 }
+
+/**
+ * Why a file that opened cleanly still cannot be played, when the reason is
+ * that it holds no pictures at all.
+ *
+ * "This file contains no video frames" is true and useless: the file is plainly
+ * not empty, and the viewer is left to guess whether the player failed or the
+ * recorder did. So the message says what the file *does* hold, and -- for the
+ * one shape this actually turns up in -- why a recorder would write such a
+ * thing. A BVR export whose span contains no key frame is the case: Blue Iris
+ * writes the configuration header and the overlay object definitions up front
+ * and then copies frames starting from the first key frame in range, so a slice
+ * that straddles no key frame yields a file with a complete header and nothing
+ * after it.
+ *
+ * `hint` points at the button that answers the question the message raises. The
+ * report opens with this same sentence and turns it off, having rather
+ * obviously already been asked for.
+ */
+export function describeNoVideo (header, index, hint = true) {
+  const mp4 = !!header && header.container === 'mp4'
+  const lead = mp4
+    ? 'This file has no video track.'
+    : 'This recording contains no video frames.'
+
+  const held = []
+  if (index) {
+    const audio = index.audio ? index.audio.count : 0
+    const meta = index.metadata ? index.metadata.length : 0
+    if (audio) held.push(`${audio.toLocaleString()} audio packet${audio === 1 ? '' : 's'}`)
+    if (meta) held.push(`${meta.toLocaleString()} overlay metadata record${meta === 1 ? '' : 's'}`)
+  }
+  const contents = held.length
+    ? `Past its header it holds only ${held.join(' and ')} — no pictures.`
+    : 'Past its header there is nothing in it at all.'
+
+  const why = mp4
+    ? ''
+    : ' A clip exported from a span of another recording that contains no key ' +
+      'frame comes out like this: the header is written first, and then there ' +
+      'is nothing to copy.'
+
+  const next = hint ? ' Export metadata to see everything the file does contain.' : ''
+  return `${lead} ${contents}${why}${next}`
+}

@@ -627,6 +627,53 @@ marks and recording-segment starts
 that seeks on click. Overlays can also be drawn back over the video, where they
 stay registered with the picture under rotation, flip and zoom.
 
+The panel opens for any recording, not only one carrying overlay records. It used
+to be hidden for a file with none, on the grounds that there was nothing to show;
+that stopped being true once the File and Frame tabs described the container
+rather than the overlay, and it left an MP4 — which never has overlay metadata —
+with no way to reach any of it, or the report below.
+
+### Exporting metadata
+
+**Export metadata** at the foot of the metadata panel writes a plain-text report
+describing every part of the file, and hands it to the browser as
+`<recording>.metadata.txt`. It is a superset of what the panel can show: the
+header frame field by field, the declared audio and video formats, an inventory
+of every frame in the file by kind with its payload bytes, per-stream statistics
+(key-frame spacing, measured rate, bitrate, smallest and largest frame, the
+camera-state histogram), every overlay object definition in full, the first and
+last overlay update records decoded, and the marks and segment starts.
+
+The same button appears under the "Could not play this file" message, which is
+the reason the feature exists. A file the player refuses is the file somebody most
+needs described, so `analyzeRecording` never refuses one itself: it opens the
+container in `tolerant` mode — which skips the one refusal `openContainer`
+normally makes, a file this device cannot decode — and every stage after that is
+allowed to fail and still produce a report of what was learned before it did. A
+file that is not a recording at all gets its opening bytes as a hex dump.
+
+Where the file is already open the report is built from the `header`, `index` and
+`probe` already in memory and appears instantly. After a failed open the player is
+holding nothing — it drops everything when an open throws — so the file is read
+again from the blob, and that scan is what the button's progress counts.
+
+What the report deliberately leaves out is a line per frame: a recording is
+hundreds of thousands of frames, and a report nobody can read is not a
+diagnostic. Overlay update records are treated the same way. They are scattered
+the length of the file, so reading all of them would mean reading the file a
+second time for very little; the first and last are decoded and the rest counted,
+which loses nothing structural because the format guarantees the first record
+holds every object's initial content.
+
+#### The file that prompted it
+
+A BVR exported from Blue Iris out of a span containing no key frame comes out as
+a header frame, the overlay object definitions, and nothing else — 7,840 bytes of
+perfectly valid container with no pictures in it. The player used to answer that
+with "This file contains no video frames", which is true and useless: the file is
+plainly not empty. `describeNoVideo` now says what the file *does* hold, why a
+recorder would write such a thing, and points at the report.
+
 ### Exporting to MP4
 
 **Export** writes an MP4 of the whole recording or a trimmed range, in one of two

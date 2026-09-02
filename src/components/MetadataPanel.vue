@@ -217,17 +217,32 @@
       </section>
     </div>
 
-    <div v-if="state.hasMetadata" class="metapanel__foot">
-      <label class="metapanel__toggle">
-        <input type="checkbox" :checked="state.overlayEnabled" @change="$emit('overlay', { enabled: $event.target.checked })" />
-        <AppIcon name="eye" :size="16" />
-        <span>Draw overlays on the video</span>
-      </label>
-      <div v-if="state.overlayEnabled" class="metapanel__subtoggles">
-        <label><input type="checkbox" :checked="show.shapes" @change="$emit('overlay', { shapes: $event.target.checked })" /> boxes</label>
-        <label><input type="checkbox" :checked="show.text" @change="$emit('overlay', { text: $event.target.checked })" /> text</label>
-        <label><input type="checkbox" :checked="show.graphics" @change="$emit('overlay', { graphics: $event.target.checked })" /> images</label>
-      </div>
+    <div class="metapanel__foot">
+      <template v-if="state.hasMetadata">
+        <label class="metapanel__toggle">
+          <input type="checkbox" :checked="state.overlayEnabled" @change="$emit('overlay', { enabled: $event.target.checked })" />
+          <AppIcon name="eye" :size="16" />
+          <span>Draw overlays on the video</span>
+        </label>
+        <div v-if="state.overlayEnabled" class="metapanel__subtoggles">
+          <label><input type="checkbox" :checked="show.shapes" @change="$emit('overlay', { shapes: $event.target.checked })" /> boxes</label>
+          <label><input type="checkbox" :checked="show.text" @change="$emit('overlay', { text: $event.target.checked })" /> text</label>
+          <label><input type="checkbox" :checked="show.graphics" @change="$emit('overlay', { graphics: $event.target.checked })" /> images</label>
+        </div>
+      </template>
+
+      <!-- Everything this panel shows, and a good deal it has no room for, as a
+           file to keep or to send on. -->
+      <button
+        type="button"
+        class="btn btn--wide metapanel__export"
+        :disabled="analyzing"
+        :title="`Write a text report describing every part of ${state.fileName || 'this recording'}`"
+        @click="$emit('analyze')"
+      >
+        <AppIcon name="download" :size="16" />
+        <span>{{ analyzing ? 'Reading the file...' : 'Export metadata' }}</span>
+      </button>
     </div>
   </div>
 </template>
@@ -265,9 +280,12 @@ export default {
     // index the player publishes counts frames in whichever one is playing.
     pstream: { type: Object, default: null },
     show: { type: Object, required: true },
-    metadataAt: { type: Function, default: null }
+    metadataAt: { type: Function, default: null },
+    // True while a report is being written, which on a file the player never
+    // finished opening means reading it end to end.
+    analyzing: { type: Boolean, default: false }
   },
-  emits: ['seek', 'overlay'],
+  emits: ['seek', 'overlay', 'analyze'],
   data () {
     return {
       tab: 'frame',
@@ -808,6 +826,17 @@ export default {
   flex: none;
   padding: 10px 13px 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+/* Sits under the overlay toggles when there are any, and alone otherwise. */
+.metapanel__export {
+  width: 100%;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.metapanel__foot > .metapanel__export:first-child {
+  margin-top: 0;
 }
 
 .metapanel__toggle {
