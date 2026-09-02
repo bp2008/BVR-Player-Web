@@ -635,35 +635,81 @@ with no way to reach any of it, or the report below.
 
 ### Exporting metadata
 
-**Export metadata** at the foot of the metadata panel writes a plain-text report
-describing every part of the file, and hands it to the browser as
-`<recording>.metadata.txt`. It is a superset of what the panel can show: the
-header frame field by field, the declared audio and video formats, an inventory
-of every frame in the file by kind with its payload bytes, per-stream statistics
-(key-frame spacing, measured rate, bitrate, smallest and largest frame, the
-camera-state histogram), every overlay object definition in full, the first and
-last overlay update records decoded, and the marks and segment starts.
+**Export metadata** at the foot of the metadata panel offers two reports, and the
+same button appears under the "Could not play this file" message — which is the
+reason the feature exists.
 
-The same button appears under the "Could not play this file" message, which is
-the reason the feature exists. A file the player refuses is the file somebody most
-needs described, so `analyzeRecording` never refuses one itself: it opens the
-container in `tolerant` mode — which skips the one refusal `openContainer`
-normally makes, a file this device cannot decode — and every stage after that is
-allowed to fail and still produce a report of what was learned before it did. A
-file that is not a recording at all gets its opening bytes as a hex dump.
+- **Simple summary** (`<recording>.metadata.txt`) — the shape of the file, as
+  plain text, because what it is for is being pasted into a message to a person.
+  The header frame field by field, the declared audio and video formats, an
+  inventory of every frame by kind with its payload bytes, per-stream statistics
+  (key-frame spacing, measured rate, bitrate, smallest and largest frame, the
+  camera-state histogram), every overlay object definition in full, the first and
+  last overlay update records decoded, and the marks and segment starts.
+- **Detailed summary** (`<recording>.metadata.html`) — all of that, plus the
+  overlay record log: every update record the file holds, filterable, each one
+  expanding to the text, bounding boxes, images and GPS fix it carried. Rendered
+  as one standalone HTML file that loads nothing from the network.
 
-Where the file is already open the report is built from the `header`, `index` and
-`probe` already in memory and appears instantly. After a failed open the player is
-holding nothing — it drops everything when an open throws — so the file is read
-again from the blob, and that scan is what the button's progress counts.
+A file the player refuses is the file somebody most needs described, so the
+analysis never refuses one itself: it opens the container in `tolerant` mode —
+which skips the one refusal `openContainer` normally makes, a file this device
+cannot decode — and every stage after that is allowed to fail and still leave a
+model describing what was learned before it did. A file that is not a recording
+at all gets its opening bytes as a hex dump.
 
-What the report deliberately leaves out is a line per frame: a recording is
-hundreds of thousands of frames, and a report nobody can read is not a
-diagnostic. Overlay update records are treated the same way. They are scattered
-the length of the file, so reading all of them would mean reading the file a
-second time for very little; the first and last are decoded and the rest counted,
-which loses nothing structural because the format guarantees the first record
-holds every object's initial content.
+Where the file is already open the model is built from the `header`, `index` and
+`probe` already in memory. After a failed open the player is holding nothing — it
+drops everything when an open throws — so the file is read again from the blob,
+and that scan is what the button's progress counts.
+
+The three modules divide as `analysis.js` (reads the file once, builds the model),
+`reportText.js` and `reportHtml.js` (render it, and touch no file at all).
+
+#### The record log, and why the text report has none
+
+An hour of recording writes a few thousand type-2 records: one after every key
+frame, and another whenever any object's content changes. The first version of
+this feature printed the first record, the last record, and a line saying the
+other four thousand were not listed, which is not an answer to a question anybody
+asked. The HTML report exists to answer it.
+
+Reading them is the expensive part. Records sit next to the video frame they
+describe, so they are scattered the length of the file and each is a few hundred
+bytes at most; reading each one exactly beats any windowed reader, because
+pulling a megabyte to reach eight bytes is the slower answer. Neighbours that
+share a read are free, so a run is coalesced while the gap stays under 48 KB and
+the span under 2 MB. Past `RECORD_CAP` records the file is describing a pattern
+rather than a list and the read stops, which the report says plainly rather than
+pretending the rest do not exist.
+
+Keeping the page small is the other half. Four thousand rows of server-rendered
+HTML is most of a megabyte of repeated tags, so the records ship as one JSON
+block and the rows are built in the page:
+
+- Records are packed as `[ts, dutc, bytes, entries]` and entries as
+  `[object, kind, payload]`. `dutc` is what the record's own UTC differs from the
+  recording's start plus its media time — zero for a well-formed file, one
+  character instead of thirteen.
+- Repeated strings are interned. A clock overlay's text changes every record, but
+  a bounding box's label is `person` four thousand times.
+- A graphic overlay's image is rewritten in full in every record that touches it.
+  Unique images are pooled in `analysis.js` — keyed on length plus both ends
+  rather than a hash, since the question is only "is this the same picture as
+  last time" — and embedded once each however many records carried them.
+- Every rule is in the one stylesheet; nothing is styled inline.
+
+The page script is written as an ordinary function in `reportHtml.js` and emitted
+through `Function.prototype.toString`, so it is real code the editor and the
+bundler can see rather than a string literal. It has to refer to nothing outside
+itself: a bundler renaming an outer binding would emit a name the page cannot
+resolve. In return the shipped page gets the minifier's output for free.
+
+`sample/_check/makeSamples.mjs` builds the files this was tested against. No real
+recording to hand carries a GPS track, a graphic overlay or labelled bounding
+boxes, so it takes a real file's header and video frames — keeping the codec
+probe, the index and the stream statistics genuine — and rewrites only the
+metadata frames.
 
 #### The file that prompted it
 
@@ -673,6 +719,23 @@ perfectly valid container with no pictures in it. The player used to answer that
 with "This file contains no video frames", which is true and useless: the file is
 plainly not empty. `describeNoVideo` now says what the file *does* hold, why a
 recorder would write such a thing, and points at the report.
+
+### Leaving a recording
+
+The message shown when a file will not play used to end in **Choose another
+file**, which opened the file picker. That is the wrong way out for the viewer
+who was working through a folder: the browser they had been paging through was
+gone, and getting back to it meant reopening it and finding their place. The
+button is now **Back**, and it returns to wherever the recording was opened from
+— the folder browser for a clip picked out of it, the start screen for anything
+dropped or opened by hand. `openFile` records which, because the app is the only
+thing that knows.
+
+Going back needs `BvrPlayer.close()` rather than `closeFile()`. The latter drops
+everything the file owned but leaves the published state describing it, which is
+what an *open* wants, since the next open overwrites it a moment later. Going
+back has nothing coming after it, so the state has to be reset as well or the app
+would keep showing the recording's chrome over an empty canvas.
 
 ### Exporting to MP4
 

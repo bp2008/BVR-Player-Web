@@ -763,6 +763,20 @@ export class BvrPlayer {
     this.renderer.clear()
   }
 
+  /**
+   * Closes the file and returns the player to the state the app started in.
+   *
+   * `closeFile` drops everything the file owned but leaves the published state
+   * describing it, which is what an open needs -- the next `open` overwrites it
+   * a moment later. Going *back* has nothing coming after it, so the state has
+   * to be reset as well or the app would keep showing the recording's chrome
+   * over an empty canvas.
+   */
+  close () {
+    this.closeFile()
+    this._emit(createBlankState())
+  }
+
   destroy () {
     this._destroyed = true
     this.closeFile()

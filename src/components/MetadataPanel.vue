@@ -233,22 +233,21 @@
 
       <!-- Everything this panel shows, and a good deal it has no room for, as a
            file to keep or to send on. -->
-      <button
-        type="button"
-        class="btn btn--wide metapanel__export"
-        :disabled="analyzing"
-        :title="`Write a text report describing every part of ${state.fileName || 'this recording'}`"
-        @click="$emit('analyze')"
-      >
-        <AppIcon name="download" :size="16" />
-        <span>{{ analyzing ? 'Reading the file...' : 'Export metadata' }}</span>
-      </button>
+      <ExportMetadataMenu
+        class="metapanel__export"
+        wide
+        :busy="analyzing"
+        :busy-label="analyzeLabel"
+        :name="state.fileName"
+        @choose="(format) => $emit('analyze', format)"
+      />
     </div>
   </div>
 </template>
 
 <script>
 import AppIcon from './AppIcon.vue'
+import ExportMetadataMenu from './ExportMetadataMenu.vue'
 import { formatBytes, formatTime, formatUtc } from '../util/format.js'
 import {
   FLAG_ISKEY, FLAG_ISDISCONTINUITY, FLAG_MARK, FLAG_MAINAVAILABLE, FLAG_SUBSTREAM,
@@ -271,7 +270,7 @@ function bitsText (value, names) {
 
 export default {
   name: 'MetadataPanel',
-  components: { AppIcon },
+  components: { AppIcon, ExportMetadataMenu },
   props: {
     state: { type: Object, required: true },
     context: { type: Object, default: null },
@@ -283,7 +282,8 @@ export default {
     metadataAt: { type: Function, default: null },
     // True while a report is being written, which on a file the player never
     // finished opening means reading it end to end.
-    analyzing: { type: Boolean, default: false }
+    analyzing: { type: Boolean, default: false },
+    analyzeLabel: { type: String, default: '' }
   },
   emits: ['seek', 'overlay', 'analyze'],
   data () {
@@ -830,8 +830,6 @@ export default {
 
 /* Sits under the overlay toggles when there are any, and alone otherwise. */
 .metapanel__export {
-  width: 100%;
-  justify-content: center;
   margin-top: 10px;
 }
 

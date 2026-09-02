@@ -101,17 +101,17 @@
             <!-- A file the player refuses is the file somebody most needs
                  described. Reading it again costs a scan, hence the progress. -->
             <div class="overlay__buttons">
-              <button
+              <ExportMetadataMenu
                 v-if="lastFile"
-                type="button"
-                class="btn"
-                :disabled="analyzing"
-                @click.stop="exportMetadata"
-              >
-                <AppIcon name="download" :size="16" />
-                <span>{{ analyzing ? analyzeLabel : 'Export metadata' }}</span>
+                :busy="analyzing"
+                :busy-label="analyzeLabel"
+                :name="state.fileName"
+                @choose="exportMetadata"
+              />
+              <button type="button" class="btn" :title="backTitle" @click.stop="goBack">
+                <AppIcon name="chevronLeft" :size="16" />
+                <span>Back</span>
               </button>
-              <button type="button" class="btn" @click.stop="pickFile">Choose another file</button>
             </div>
           </div>
         </div>
@@ -234,6 +234,7 @@
             :show="overlayShow"
             :metadata-at="metadataAt"
             :analyzing="analyzing"
+            :analyze-label="analyzeLabel"
             @seek="(ms) => onSeek(ms, false)"
             @overlay="onOverlay"
             @analyze="exportMetadata"
@@ -294,6 +295,7 @@ import AppIcon from './components/AppIcon.vue'
 import ControlBar from './components/ControlBar.vue'
 import FolderBrowser from './components/FolderBrowser.vue'
 import MetadataPanel from './components/MetadataPanel.vue'
+import ExportMetadataMenu from './components/ExportMetadataMenu.vue'
 import ExportPanel from './components/ExportPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import PanelFrame from './components/PanelFrame.vue'
@@ -342,7 +344,8 @@ const blankPanelMap = (value) => Object.fromEntries(PANELS.map((p) => [p.id, val
 export default {
   name: 'App',
   components: {
-    AppIcon, ControlBar, FolderBrowser, MetadataPanel, ExportPanel, SettingsPanel, PanelFrame
+    AppIcon, ControlBar, FolderBrowser, MetadataPanel, ExportPanel, SettingsPanel, PanelFrame,
+    ExportMetadataMenu
   },
   data () {
     const settings = loadSettings()
@@ -390,6 +393,9 @@ export default {
       // The file last handed to the player, kept because "Export metadata" has
       // to work after a failed open, when the player is holding nothing.
       lastFile: null,
+      // Where the current file was opened from, so Back knows what "back" is:
+      // the folder browser it was picked out of, or the start screen.
+      fileOrigin: '',
       analyzing: false,
       analyzeProgress: 0,
       // The sequence the player is showing, kept apart from `fileContext`
@@ -418,6 +424,15 @@ export default {
       return this.analyzeProgress > 0 && this.analyzeProgress < 1
         ? `Reading... ${(this.analyzeProgress * 100).toFixed(0)}%`
         : 'Reading the file...'
+    },
+    /** Where Back lands, said plainly enough to be a tooltip. */
+    backTitle () {
+      return this.backToLibrary
+        ? 'Back to the folder this clip was picked from'
+        : 'Back to the start screen'
+    },
+    backToLibrary () {
+      return this.fileOrigin === 'library' && this.canBrowse
     },
     hasFile () {
       return this.state.status === 'ready' || this.state.status === 'loading' || this.state.status === 'error'
@@ -610,7 +625,7 @@ export default {
       if (file) this.openFile(file)
       event.target.value = ''
     },
-    async openFile (file) {
+    async openFile (file, origin = 'dropzone') {
       this.notice = ''
       this.uiVisible = true
       // The panels stay open across files now that they sit beside the video
@@ -620,9 +635,28 @@ export default {
       this.fileContext = null
       this.playbackStream = null
       this.lastFile = file
+      this.fileOrigin = origin
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
+    },
+    /**
+     * Leaves the recording for wherever it was opened from.
+     *
+     * Two places, and the app already knew both: a clip picked out of the folder
+     * browser goes back to the folder, and anything dropped or opened by hand
+     * goes back to the start screen. Escape does the same thing from a playing
+     * file (see the key handler); this is that gesture given a button, because
+     * "Choose another file" was the only way out of a refusal and it threw away
+     * the folder the viewer was working through.
+     */
+    goBack () {
+      const toLibrary = this.backToLibrary
+      this.player.close()
+      this.lastFile = null
+      this.fileOrigin = ''
+      this.notice = ''
+      if (toLibrary) this.openLibrary()
     },
     /**
      * Hands the panels the recording and the sequence being played.
@@ -648,7 +682,7 @@ export default {
         const file = await openEntry(clip)
         this.folderKnown = true
         this.libraryOpen = false
-        await this.openFile(file)
+        await this.openFile(file, 'library')
       } catch (e) {
         this.showNotice(`Could not open ${clip.name}: ${e.message}`)
       }
@@ -1053,7 +1087,7 @@ export default {
      * everything when an open throws -- so the file is read again from the blob
      * the last open was given, and that scan is what the progress counts.
      */
-    async exportMetadata () {
+    async exportMetadata (format = 'text') {
       if (this.analyzing) return
       const context = this.player.metadataContext()
       const file = context ? context.blob : this.lastFile
@@ -1062,14 +1096,18 @@ export default {
         return
       }
       this.analyzing = true
-      this.analyzeProgress = context ? 1 : 0
+      // With the file open the text report needs no reading at all, so its bar
+      // would only ever flash; the detailed one still has every overlay record
+      // to fetch, and that is worth watching.
+      this.analyzeProgress = (context && format === 'text') ? 1 : 0
       try {
         const report = await analyzeRecording(file, {
           ...(context || {}),
+          format,
           fileName: (context && context.fileName) || this.state.fileName || file.name,
           onProgress: (p) => { this.analyzeProgress = p }
         })
-        downloadBlob(new Blob([report.text], { type: 'text/plain;charset=utf-8' }), report.name)
+        downloadBlob(new Blob([report.text], { type: report.mime }), report.name)
         this.showNotice(`Saved ${report.name}.`)
       } catch (e) {
         const why = e && e.message ? e.message : String(e)
