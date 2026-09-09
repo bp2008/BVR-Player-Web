@@ -309,8 +309,12 @@ recording itself was named — a clip downloaded through UI3 arrives as
 `Front Wide 2026-08-25 05.00.00 PM.bvr` and its stills come out as
 `Front Wide.20260825_230145.310Z.jpg`, so a folder of stills sorts by camera and
 moment however they were collected. The format is JPEG at 85% quality by
-default; both the format (WebP is offered where the browser can encode it) and
-the quality are in the settings panel.
+default; both the format and the quality are in the settings panel. WebP is
+offered where the browser can encode it, for a file roughly two-thirds the size
+at the same visual quality. Two lossless formats are offered as well, for the
+still that has to be the frame exactly: PNG, which every program reads, and
+lossless WebP, which is usually a good deal smaller and read by fewer of them.
+Neither has a quality to set, so the quality box disappears when one is chosen.
 
 Stills download as ordinary files. **Save into the open folder** writes them
 straight into the folder **Browse** has open instead, which avoids the browser's
@@ -1374,7 +1378,16 @@ press. Overlay line and glyph sizes are taken from the on-screen fit rather than
 from the still's own pixel count, so a saved frame looks like the one that was
 being looked at instead of carrying hairlines across 2688 pixels. WebP is
 feature-tested on a single pixel, because a canvas asked for a format it lacks
-quietly writes PNG instead. The flash cue is one element per still, each running
+quietly writes PNG instead. Lossless WebP is feature-tested the same way and one
+step further: the canvas API has no way to ask for lossless — the encoders that
+have it switch to it at quality 1, and the ones that do not write a quality-100
+lossy file to the same call — so the probe reads the container back and walks its
+RIFF chunks looking for the `VP8L` that marks a lossless picture. The walk is
+what the fixed offset would have been, except that a canvas with anything on it
+encodes to an extended container with a colour profile ahead of the picture.
+Where lossless is missing the format is struck from the settings list, and a
+still asked for in it anyway (a setting carried over from another browser) is
+written as PNG, which is at least the lossless thing that was asked for. The flash cue is one element per still, each running
 its own animation and discarded when it finishes — sharing one element would mean
 restarting an animation mid-flight, and a burst would read as a single long flash
 rather than as one cue per still.

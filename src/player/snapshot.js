@@ -12,14 +12,21 @@
  * is native code, so it costs nothing to use -- but it is not the default,
  * because "why will my photo viewer not open this" is a worse outcome than a
  * larger file.
+ *
+ * The two lossless formats are for the still that has to be exactly what was on
+ * screen -- evidence, or a frame something else will measure -- at several times
+ * the size. PNG is the one every program reads; lossless WebP is the same
+ * picture, usually a good deal smaller, read by fewer of them.
  */
 
 import { parseBvrName } from '../library/bvrName.js'
 import { downloadBlob } from '../util/download.js'
 
 export const SNAPSHOT_FORMATS = [
-  { value: 'jpeg', label: 'JPEG', mime: 'image/jpeg', ext: 'jpg' },
-  { value: 'webp', label: 'WebP', mime: 'image/webp', ext: 'webp' }
+  { value: 'jpeg', label: 'JPEG', mime: 'image/jpeg', ext: 'jpg', lossless: false },
+  { value: 'webp', label: 'WebP', mime: 'image/webp', ext: 'webp', lossless: false },
+  { value: 'webp-lossless', label: 'WebP (lossless)', mime: 'image/webp', ext: 'webp', lossless: true },
+  { value: 'png', label: 'PNG (lossless)', mime: 'image/png', ext: 'png', lossless: true }
 ]
 
 export const DEFAULT_SNAPSHOT_QUALITY = 85
@@ -30,6 +37,11 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
 export function snapshotFormat (value) {
   return SNAPSHOT_FORMATS.find((f) => f.value === value) || SNAPSHOT_FORMATS[0]
+}
+
+/** Whether a format has a quality to set at all. Lossless ones do not. */
+export function formatHasQuality (value) {
+  return !snapshotFormat(value).lossless
 }
 
 export function clampQuality (value) {
@@ -60,6 +72,57 @@ export function canEncodeWebp () {
   return webpChecked
 }
 
+/**
+ * Whether a WebP file's picture is stored losslessly, from its container.
+ *
+ * A WebP is a RIFF file: `RIFF`, a length, `WEBP`, then chunks of a four-byte
+ * name, a little-endian length and a payload padded to an even size. The picture
+ * is in `VP8L` when it is lossless and `VP8 ` when it is not. The chunks are
+ * walked rather than read at a fixed offset because an extended (`VP8X`)
+ * container carries the colour profile first, which puts the picture a couple of
+ * kilobytes in -- and a canvas with anything drawn on it does produce one.
+ */
+function webpIsLossless (bytes) {
+  if (bytes.length < 16 || bytes.slice(0, 4) !== 'RIFF' || bytes.slice(8, 12) !== 'WEBP') return false
+  let at = 12
+  while (at + 8 <= bytes.length) {
+    const name = bytes.slice(at, at + 4)
+    if (name === 'VP8L') return true
+    if (name === 'VP8 ') return false
+    let size = 0
+    for (let i = 3; i >= 0; i--) size = size * 256 + bytes.charCodeAt(at + 4 + i)
+    at += 8 + size + (size & 1)
+  }
+  return false
+}
+
+/**
+ * Whether this browser's canvas can encode *lossless* WebP.
+ *
+ * There is no way to ask for it: the canvas API has one quality argument, and
+ * the encoders that have lossless switch to it at quality 1. An encoder that
+ * does not takes the same call and writes a quality-100 lossy file, which looks
+ * right and is not -- so, as with WebP itself, the answer is tested rather than
+ * assumed. One pixel is enough: what decides the encoder's mode is the quality,
+ * not the picture.
+ */
+let losslessWebpChecked = null
+export function canEncodeLosslessWebp () {
+  if (losslessWebpChecked !== null) return losslessWebpChecked
+  losslessWebpChecked = false
+  try {
+    if (!canEncodeWebp()) return losslessWebpChecked
+    const probe = document.createElement('canvas')
+    probe.width = 1
+    probe.height = 1
+    const url = probe.toDataURL('image/webp', 1)
+    losslessWebpChecked = webpIsLossless(atob(url.slice(url.indexOf(',') + 1)))
+  } catch {
+    losslessWebpChecked = false
+  }
+  return losslessWebpChecked
+}
+
 function toBlob (canvas, type, quality) {
   return new Promise((resolve) => {
     try {
@@ -76,9 +139,18 @@ function toBlob (canvas, type, quality) {
  */
 export async function encodeSnapshot (canvas, { format = 'jpeg', quality = DEFAULT_SNAPSHOT_QUALITY } = {}) {
   if (!canvas) return null
-  const wanted = snapshotFormat(format)
+  let wanted = snapshotFormat(format)
+  // A browser that cannot write lossless WebP takes the same call and writes a
+  // quality-100 lossy file, which is not what was asked for. PNG is the
+  // substitution that keeps the promise the format made, at a cost in size.
+  if (wanted.lossless && wanted.mime === 'image/webp' && !canEncodeLosslessWebp()) {
+    wanted = snapshotFormat('png')
+  }
   const q = clampQuality(quality) / 100
-  let blob = await toBlob(canvas, wanted.mime, q)
+  // PNG ignores the argument; WebP encoders take quality 1 as the request for
+  // lossless. The fallback keeps the settled quality either way, so a lossless
+  // still that has to become a JPEG does not also become a quality-100 one.
+  let blob = await toBlob(canvas, wanted.mime, wanted.lossless ? 1 : q)
   if ((!blob || blob.type !== wanted.mime) && wanted.mime !== 'image/jpeg') {
     blob = await toBlob(canvas, 'image/jpeg', q)
   }

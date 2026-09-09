@@ -1,5 +1,6 @@
 import { PANEL_IDS, DEFAULT_SIDES } from '../panels/panels.js'
 import { DEFAULT_DOCK, MAX_DOCK, MIN_DOCK } from '../panels/layout.js'
+import { SNAPSHOT_FORMATS } from '../player/snapshot.js'
 
 const KEY = 'bvr-player.settings.v1'
 
@@ -43,8 +44,10 @@ export const DEFAULT_SETTINGS = {
 
   // Snapshots. JPEG at 85 is the photographic default; WebP is offered for the
   // roughly two-thirds smaller file but is not the default, because a still that
-  // some other program refuses to open is worse than a larger one.
-  snapshotFormat: 'jpeg',  // 'jpeg' | 'webp'
+  // some other program refuses to open is worse than a larger one. The lossless
+  // pair -- PNG and WebP at quality 1 -- are there for the still that has to be
+  // the frame exactly, and ignore the quality below. See player/snapshot.js.
+  snapshotFormat: 'jpeg',  // see SNAPSHOT_FORMATS
   snapshotQuality: 85,
   // Writing into the folder being browsed skips the downloads bar, which
   // interrupts the picture on every save. It needs write permission on that
@@ -115,7 +118,7 @@ export function loadSettings () {
     out.volume = Math.min(1, Math.max(0, out.volume))
     out.playbackRate = Math.min(16, Math.max(0.05, out.playbackRate || 1))
     out.snapshotQuality = Math.min(100, Math.max(1, Math.round(out.snapshotQuality) || 85))
-    if (out.snapshotFormat !== 'webp') out.snapshotFormat = 'jpeg'
+    if (!SNAPSHOT_FORMATS.some((f) => f.value === out.snapshotFormat)) out.snapshotFormat = 'jpeg'
     if (out.libraryView !== 'list') out.libraryView = 'grid'
     out.panelSides = readSides(parsed.panelSides)
     out.panelOrder = readOrder(parsed.panelOrder)

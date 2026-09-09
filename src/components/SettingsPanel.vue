@@ -198,7 +198,7 @@
       </select>
     </label>
 
-    <label class="spanel__row">
+    <label class="spanel__row" v-if="hasQuality">
       <span class="spanel__label">Quality</span>
       <span class="spanel__control">
         <input
@@ -333,7 +333,7 @@
 import { streamOptions } from '../util/streams.js'
 import { PLAYBACK_RATES } from '../player/BvrPlayer.js'
 import { mainStartPoints } from '../player/coverage.js'
-import { SNAPSHOT_FORMATS, canEncodeWebp } from '../player/snapshot.js'
+import { SNAPSHOT_FORMATS, canEncodeWebp, canEncodeLosslessWebp, formatHasQuality } from '../player/snapshot.js'
 import { canPickDirectory } from '../library/directory.js'
 import { clearThumbs, countThumbs } from '../library/thumbCache.js'
 import { clearSiteData, closePage, storageUsage } from '../util/storage.js'
@@ -447,18 +447,31 @@ export default {
 
     // -------------------------------------------------------------- snapshots
     formats () {
+      // Both WebP entries are offered only where the encoder actually has them:
+      // one browser in circulation writes PNG when asked for WebP, and another
+      // writes a lossy file when asked for a lossless one.
       const webp = canEncodeWebp()
-      return SNAPSHOT_FORMATS.map((f) => ({
-        value: f.value,
-        label: f.value === 'webp' && !webp ? 'WebP (not available here)' : f.label,
-        disabled: f.value === 'webp' && !webp
-      }))
+      return SNAPSHOT_FORMATS.map((f) => {
+        const missing = f.mime === 'image/webp' &&
+          !(f.lossless ? canEncodeLosslessWebp() : webp)
+        return {
+          value: f.value,
+          label: missing ? `${f.label} (not available here)` : f.label,
+          disabled: missing
+        }
+      })
+    },
+    hasQuality () {
+      return formatHasQuality(this.settings.snapshotFormat)
     },
     formatSummary () {
       const q = this.settings.snapshotQuality
-      return this.settings.snapshotFormat === 'webp'
-        ? `WebP at ${q}% — smaller files, fewer programs read them`
-        : `JPEG at ${q}% — opens anywhere`
+      switch (this.settings.snapshotFormat) {
+        case 'webp': return `WebP at ${q}% — smaller files, fewer programs read them`
+        case 'webp-lossless': return 'Lossless WebP — the frame exactly, smaller than PNG, fewer programs read it'
+        case 'png': return 'PNG — the frame exactly, opens anywhere, several times the size'
+        default: return `JPEG at ${q}% — opens anywhere`
+      }
     },
     /** Writing into a folder needs the directory API and a folder to write to. */
     canSaveToFolder () {
