@@ -168,24 +168,46 @@ you hold the pointer down — a picture already being decoded is never thrown aw
 to chase a newer position, because seeing every few frames of what you dragged
 past beats seeing none of it.
 
-#### Seeking to an exact time
+#### Seeking to an exact position
 
 Clicking the position in the control-bar readout pauses and opens a small dialog
-that takes a timestamp. The scrub bar is a couple of pixels per minute of
+that takes a position. The scrub bar is a couple of pixels per minute of
 recording, which is right for finding roughly where something is and useless for
 going back to the frame a colleague quoted; this is the other half of the same
 job.
 
-It accepts both readings the control bar offers, to the millisecond, in the
-shapes the app already writes them in — `1:04:31.500` elapsed, or
-`2026-08-24 14:39:30.250` on the clock — and opens on whichever the readout is
-currently showing. `parseTime` and `parseClock` in `util/format.js` read them
-back; each accepts what its `format*` counterpart writes plus the loosenings
-anyone typing one reaches for anyway (a bare count of seconds, a leading field
-past its usual range, a `T` between the halves, seconds or milliseconds left
-off). The clock reading is only offered where the recording says when it started,
-which rules out MP4s. Switching between the two carries the position across, not
-the text.
+It accepts every reading the control bar puts on screen, at the precision it is
+shown to, in the shape the app itself writes it:
+
+| Mode | What it takes | Offered when |
+|---|---|---|
+| Elapsed | `1:04:31.500`, `4:31.5`, or a bare count of seconds | always |
+| Date & time | `2026-08-24 14:39:30.250`, local | the recording says when it started |
+| Frame | `254`, or `1,091` as the readout writes it | there is a frame table |
+
+`parseTime`, `parseClock` and `parseFrame` in `util/format.js` read them back;
+each accepts what its counterpart writes plus the loosenings anyone typing one
+reaches for anyway — a leading field past its usual range, a `T` between the
+halves, seconds or milliseconds left off, group separators in a frame number. The
+dialog opens on whichever reading the readout is currently showing, and the mode
+buttons appear only when there is more than one to choose from: an MP4 has no
+start time to date from, so it offers elapsed and frames alone.
+
+Switching mode carries the position across, not the text. Going to frames snaps —
+0:05.500 becomes frame 165, whose own timestamp is 0:05.472 — because that is
+what expressing a position as a frame number means, and the line under the field
+says so at each step rather than letting it happen silently.
+
+Frame numbers are one-based, matching *frame 215 of 1,091* in the readout, and
+they are counted in the sequence being played rather than in the file: switching
+stream re-counts them, an hour of sub stream running to seventy thousand frames
+where the triggered main stream runs to six. The dialog is handed the same
+`pstream` the metadata panel reads, so the number typed in is the number that
+comes back out.
+
+Each mode bounds what was typed in its own units and only then works out a
+position. Frame 9,999 is past the last frame whatever time that turns out to be,
+and clamping it as a time first would mean inventing the time to clamp.
 
 Pausing is half the feature. Typing a timestamp takes seconds, and a recording
 left running underneath would have moved the playhead somewhere else by the time

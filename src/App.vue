@@ -201,6 +201,7 @@
           :current-time="state.currentTime"
           :duration="state.duration"
           :start-utc="state.startUtc"
+          :pstream="playbackStream"
           :initial-mode="settings.timeDisplay"
           @seek="onSeekDialog"
           @close="seekOpen = false"

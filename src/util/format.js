@@ -71,6 +71,23 @@ export function parseClock (text) {
   return date.getTime()
 }
 
+/**
+ * Reads a frame number typed by hand, or null.
+ *
+ * One-based, because that is how the control bar counts them out loud -- "frame
+ * 215 of 1,091" -- and someone typing a number back has that line in front of
+ * them. Group separators are accepted for the same reason: the readout writes
+ * them, and what gets typed back is often what was read off the screen. Zero and
+ * anything past the last frame parse fine and are somebody else's to bound; this
+ * only says whether a number was typed.
+ */
+export function parseFrame (text) {
+  if (typeof text !== 'string') return null
+  const s = text.trim().replace(/[,'\s]/g, '')
+  if (!/^\d{1,9}$/.test(s)) return null
+  return Number(s)
+}
+
 export function formatBytes (n) {
   if (!n) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

@@ -29,7 +29,7 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Previous / next frame | ⏮ / ⏭ buttons | <kbd>,</kbd> / <kbd>.</kbd> (or <kbd>Shift</kbd>+arrow) |
 | Jump to next/previous main stream start | optional, buttons appear next to `Previous / next frame` | <kbd>Ctrl</kbd>+<kbd>,</kbd> / <kbd>Ctrl</kbd>+<kbd>.</kbd> (or <kbd>Ctrl</kbd>+arrow) |
 | Seek | scrub bar | <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>0</kbd>–<kbd>9</kbd> |
-| Seek to an exact time | click the position in the readout | |
+| Seek to an exact time or frame | click the position in the readout | |
 | Playback speed | speed chip | <kbd>[</kbd> / <kbd>]</kbd> |
 | Zoom / pan | wheel, pinch, drag | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>Z</kbd> to reset |
 | Volume / mute | speaker button + slider | <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>M</kbd> |
