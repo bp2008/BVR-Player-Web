@@ -63,6 +63,18 @@
               or choose one to open. Files are decoded locally in your browser and
               never uploaded.
             </p>
+            <!-- The URL named a recording, and the browser wants a click before
+                 it will hand the folder back. See resumeFromUrl. -->
+            <div v-if="resumePrompt" class="dropzone__resume">
+              <button type="button" class="btn btn--accent" @click.stop="acceptResume">
+                <AppIcon name="play" :size="18" />
+                <span class="dropzone__resumename">Resume {{ resumePrompt.name }}</span>
+              </button>
+              <p class="dropzone__resumetext">
+                This page was last showing that recording. Reopening it needs
+                permission for <strong>{{ resumePrompt.dir }}</strong> again.
+              </p>
+            </div>
             <div class="dropzone__buttons">
               <button type="button" class="btn btn--accent" @click.stop="pickFile">
                 <AppIcon name="folder" :size="18" />
@@ -317,13 +329,15 @@ import { BvrPlayer, createBlankState, PLAYBACK_RATES } from './player/BvrPlayer.
 import { ViewController } from './player/ViewController.js'
 import { adjacentMainStart, mainStartPoints } from './player/coverage.js'
 import {
-  canBrowseDirectories, canPickDirectory, directoryPermission, openEntry, writeFileTo
+  canBrowseDirectories, canPickDirectory, directoryPermission, openEntry, openFileNamed,
+  writeFileTo
 } from './library/directory.js'
 import { loadDirectoryHandle } from './library/thumbCache.js'
 import { downloadSnapshot, encodeSnapshot, snapshotName } from './player/snapshot.js'
 import { analyzeRecording } from './container/analyze.js'
 import { downloadBlob } from './util/download.js'
 import { loadSettings, saveSettings } from './util/settings.js'
+import { readSessionUrl, sessionHash, writeSessionHash } from './util/sessionUrl.js'
 import { formatBytes } from './util/format.js'
 import { acceptsTypedText, isSpaceKey } from './util/keys.js'
 import { PANELS, panelDef } from './panels/panels.js'
@@ -339,6 +353,12 @@ const UI_IDLE_TOUCH_MS = 4200
 const CHROME_SELECTOR = '.topbar, .controlbar, .dock'
 
 const SIDES = ['left', 'right']
+
+// How often the playhead is allowed to reach the address bar. Everything else
+// -- a panel opening, a pause, a file -- is written the moment it happens; the
+// position alone waits, because it moves sixty times a second and nobody is
+// reading it at that rate. Two seconds is what a reload loses at worst.
+const URL_SYNC_MS = 2000
 
 // Long enough for the cue's own animation to finish; the element is only kept
 // alive to be animated, so it is dropped a beat afterwards.
@@ -376,6 +396,9 @@ export default {
       pointerOverChrome: false,
       installPrompt: null,
       libraryOpen: false,
+      // Set when the URL names a recording the browser will only hand back
+      // after a click: `{ name, dir }`, and the dropzone's Resume button.
+      resumePrompt: null,
       // The "seek to a time" dialog. Not a panel: see SeekDialog.vue.
       seekOpen: false,
       // Whether there is a folder to go back to. Escape returns to the browser
@@ -526,6 +549,14 @@ export default {
     'state.playing' () {
       // Pausing no longer pins the chrome open; it re-arms the same idle timer.
       this.wakeUi()
+      this.syncUrl()
+    },
+    // The playhead, thirty to sixty times a second while playing and once per
+    // seek while paused. syncUrl is what decides that most of those are not
+    // worth an address bar rewrite; the point of watching it at all is that
+    // there is then only one place the URL is built from.
+    'state.currentTime' () {
+      this.syncUrl()
     },
     'state.status' (status) {
       this.wakeUi()
@@ -534,6 +565,27 @@ export default {
       if (status !== 'ready') this.seekOpen = false
       if (status === 'ready') this.onFileReady()
       else if (status !== 'loading') this.closeFilePanels()
+      // A recording that was found and then refused is as resumed as it is ever
+      // going to be; there is nothing left to put back. The URL keeps naming it
+      // all the same, so a reload shows the same refusal rather than silently
+      // forgetting which file it was about.
+      if (status === 'error') {
+        this.resumeState = null
+        this.resumeTarget = null
+      }
+      this.syncUrl()
+    },
+    // Which panels are open, and in what order down each dock.
+    openIds () {
+      this.syncUrl()
+    },
+    // Collapsed *by the viewer*: the other kind is a consequence of how tall
+    // the dock happens to be, and reproduces itself on its own.
+    panelCollapsed () {
+      this.syncUrl()
+    },
+    'settings.panelSides' () {
+      this.syncUrl()
     },
     // Switching stream builds a whole new frame table -- an hour of continuous
     // sub stream counts seventy thousand frames where the triggered main stream
@@ -581,6 +633,31 @@ export default {
     // hand Vue a proxy where the File System Access API expects the handle.
     this.snapshotDir = null
     this.snapCueSeq = 0
+
+    // ---------------------------------------------------------- the URL
+    // Nothing is written until the fragment the page was loaded with has been
+    // read: the first thing every one of these watchers does is fire, and a
+    // URL rewritten from a blank app before it has been restored is the state
+    // it was meant to restore, gone.
+    this.urlReady = false
+    // The last fragment written, and the same thing without the playhead in it.
+    // Comparing the first says whether anything changed at all; comparing the
+    // second says whether what changed was worth writing immediately.
+    this.urlHash = null
+    this.urlStable = null
+    this.urlWrittenAt = 0
+    this.urlTrailing = null
+    // Where the open recording lives, when it lives somewhere a reload could
+    // find it again: `{ dir, name }`, or null for a file that was dropped,
+    // chosen from the file picker or handed over by the OS -- none of which
+    // leaves the page anything to reopen.
+    this.fileRef = null
+    // What the URL asked for, from the moment it is read until the recording it
+    // names is open (or the attempt is given up on).
+    this.resumeTarget = null
+    // `{ time, playing, panels }` for the file currently being opened, consumed
+    // once its index is built. See onFileReady.
+    this.resumeState = null
   },
   mounted () {
     this.player = new BvrPlayer({
@@ -632,6 +709,7 @@ export default {
     this.mounted = true
     this.consumeLaunchFiles()
     this.restoreSnapshotFolder()
+    this.restoreFromUrl()
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.onSpaceKey, true)
@@ -643,6 +721,7 @@ export default {
     if (this.dockRo) this.dockRo.disconnect()
     if (this.view) this.view.detach()
     this.clearHideTimer()
+    if (this.urlTrailing) clearTimeout(this.urlTrailing)
     this.closeAllPopouts()
     if (this.player) this.player.destroy()
   },
@@ -658,7 +737,14 @@ export default {
       if (file) this.openFile(file)
       event.target.value = ''
     },
-    async openFile (file, origin = 'dropzone') {
+    /**
+     * `ref` says where this file can be found again -- `{ dir, name }` for one
+     * picked out of a folder the browser will still have a handle for after a
+     * reload, and null for anything dropped, chosen from the file picker or
+     * handed over by the OS, none of which survives the page. `resume` is the
+     * state a reload is putting back; see onFileReady.
+     */
+    async openFile (file, origin = 'dropzone', { ref = null, resume = null } = {}) {
       this.notice = ''
       this.uiVisible = true
       // The panels stay open across files now that they sit beside the video
@@ -669,6 +755,14 @@ export default {
       this.playbackStream = null
       this.lastFile = file
       this.fileOrigin = origin
+      this.fileRef = ref
+      this.resumeState = resume
+      // Opening a file by hand supersedes whatever the URL was still hoping to
+      // reopen. A resume opening its own file does not: it stays the page's
+      // description of itself until the recording is actually back where it
+      // was, which on a large one is several seconds of indexing.
+      if (!resume) this.cancelResume()
+      else this.syncUrl()
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
@@ -687,6 +781,7 @@ export default {
       const toLibrary = this.backToLibrary
       this.player.close()
       this.lastFile = null
+      this.fileRef = null
       this.fileOrigin = ''
       this.notice = ''
       if (toLibrary) this.openLibrary()
@@ -708,14 +803,33 @@ export default {
       // A speed carried over from the last clip is more surprising than useful,
       // so each file starts at 1x however the last one was left.
       if (this.state.rate !== 1) this.player.setRate(1)
-      if (this.settings.autoplay) this.player.play()
+
+      // The first moment a resumed recording can be put back the way it was:
+      // the panels that describe it have something to describe, and the
+      // playhead has a duration to sit within. What the URL says beats the
+      // autoplay setting -- it is a record of how this page was left, not a
+      // preference about how a freshly opened one should start.
+      const resume = this.resumeState
+      this.resumeState = null
+      this.resumeTarget = null
+      if (resume) {
+        this.openUrlPanels(resume.panels, resume.collapsed)
+        if (resume.time > 0) this.onSeek(Math.min(resume.time, this.state.duration), false)
+        if (resume.playing) this.player.play()
+      } else if (this.settings.autoplay) {
+        this.player.play()
+      }
     },
     async onLibraryOpen (clip) {
       try {
         const file = await openEntry(clip)
         this.folderKnown = true
         this.libraryOpen = false
-        await this.openFile(file, 'library')
+        // Only a clip that came from a directory handle can be found again from
+        // a URL; one out of a `webkitdirectory` listing has no way back.
+        await this.openFile(file, 'library', {
+          ref: clip.dir ? { dir: clip.dir.name, name: clip.name } : null
+        })
       } catch (e) {
         this.showNotice(`Could not open ${clip.name}: ${e.message}`)
       }
@@ -1231,6 +1345,237 @@ export default {
       this.snapshotDir = handle || null
       this.snapshotFolderReady = !!handle
       this.snapshotFolderName = (handle && handle.name) || (handle ? 'the open folder' : '')
+    },
+
+    // ---------------------------------------------------- session in the URL
+    /**
+     * Everything the address bar is written from, in one place.
+     *
+     * Called from wherever the app changes -- a panel opening, a pause, a seek,
+     * the playhead itself sixty times a second -- and it is this function, not
+     * its callers, that decides which of those are worth a rewrite. A fragment
+     * identical to the one already there is dropped; one that differs only in
+     * the playhead waits out `URL_SYNC_MS`, with a single trailing timer so the
+     * last position of a burst still lands; anything else goes out at once.
+     *
+     * `replaceState` never navigates, so none of this touches the back button,
+     * reloads the page, or disturbs the recording being decoded.
+     */
+    syncUrl () {
+      if (!this.urlReady) return
+      // Until a pending resume is settled the URL keeps describing the
+      // recording it is waiting on rather than the empty player in front of it.
+      // Otherwise the very first write would erase the thing the Resume button
+      // exists to act on.
+      const waiting = this.resumeTarget
+      const { hash, stable } = sessionHash({
+        file: waiting ? waiting.file : this.fileRef,
+        time: waiting ? waiting.time : this.state.currentTime,
+        playing: waiting ? waiting.playing : this.state.playing,
+        panels: this.urlPanels()
+      })
+      if (hash === this.urlHash) return
+      const wait = URL_SYNC_MS - (Date.now() - this.urlWrittenAt)
+      if (stable === this.urlStable && wait > 0) {
+        if (!this.urlTrailing) {
+          this.urlTrailing = setTimeout(() => {
+            this.urlTrailing = null
+            this.syncUrl()
+          }, wait)
+        }
+        return
+      }
+      if (this.urlTrailing) {
+        clearTimeout(this.urlTrailing)
+        this.urlTrailing = null
+      }
+      this.urlHash = hash
+      this.urlStable = stable
+      this.urlWrittenAt = Date.now()
+      writeSessionHash(hash)
+    },
+    /** Which panels are open, down which dock, and which the viewer collapsed. */
+    urlPanels () {
+      const out = { left: [], right: [], collapsed: [] }
+      for (const id of this.openIds) {
+        // A popped-out panel is recorded on the side it came from. Restoring it
+        // into a window is not on offer: a page reopening pop-ups by itself is
+        // exactly what a pop-up blocker exists to stop.
+        out[this.sideOf(id)].push(id)
+        if (this.panelCollapsed[id]) out.collapsed.push(id)
+      }
+      // Panels that describe a recording cannot be open before there is one, so
+      // for as long as a resume is still waiting they live in the URL alone.
+      const waiting = this.resumeTarget
+      if (waiting) {
+        for (const id of waiting.deferred) {
+          if (this.panelOpen[id]) continue
+          out[this.sideOf(id)].push(id)
+          if (waiting.collapsed.includes(id)) out.collapsed.push(id)
+        }
+        const rank = (id) => this.settings.panelOrder.indexOf(id)
+        for (const side of SIDES) out[side].sort((a, b) => rank(a) - rank(b))
+      }
+      return out
+    },
+
+    /**
+     * The other direction, once: what the page was loaded with.
+     *
+     * Panels go back immediately -- they cost nothing and need no permission.
+     * The recording is a question the browser has to be asked, so it is handed
+     * to `resumeFromUrl` and the URL is left describing it until that settles.
+     */
+    restoreFromUrl () {
+      const saved = readSessionUrl()
+      const deferred = this.applyUrlPanels(saved.panels)
+      if (saved.file) {
+        this.resumeTarget = {
+          file: saved.file,
+          time: saved.time,
+          playing: saved.playing,
+          // The panels that had to wait for a recording to describe.
+          deferred,
+          collapsed: saved.panels.collapsed
+        }
+      }
+      // From here on the URL follows the app rather than the other way round.
+      this.urlReady = true
+      this.syncUrl()
+      if (this.resumeTarget) this.resumeFromUrl()
+    },
+    /**
+     * Puts the docks back, and says which panels could not be opened yet.
+     *
+     * The sides and the order are written through to the saved settings rather
+     * than held apart from them: the URL is the more recent record of the two,
+     * having been written by this app the last time these panels were touched,
+     * and two disagreeing sources of the same preference is worse than either.
+     */
+    applyUrlPanels (panels) {
+      const listed = [...panels.left, ...panels.right]
+      if (!listed.length) return []
+      const sides = { ...this.settings.panelSides }
+      for (const id of panels.left) sides[id] = 'left'
+      for (const id of panels.right) sides[id] = 'right'
+      // One flat order across both docks, each reading its own subsequence out
+      // of it -- so the left stack followed by the right one reproduces both,
+      // and panels the URL never mentioned keep their place behind them.
+      const order = [...listed, ...this.settings.panelOrder.filter((id) => !listed.includes(id))]
+      this.patchSettings({ panelSides: sides, panelOrder: order })
+      return this.openUrlPanels(listed, panels.collapsed)
+    },
+    /**
+     * Opens what it can and returns what it could not.
+     *
+     * The metadata and export panels are descriptions of a recording, so before
+     * there is one they are not opened but deferred -- to `onFileReady`, if a
+     * recording is on its way, and to nothing at all if it is not.
+     */
+    openUrlPanels (ids, collapsed = []) {
+      const later = []
+      for (const id of ids || []) {
+        const def = panelDef(id)
+        if (!def) continue
+        if (def.needsFile && this.state.status !== 'ready') {
+          later.push(id)
+          continue
+        }
+        this.openPanel(id)
+      }
+      // After opening, never before: opening a panel expands it.
+      const marks = (collapsed || []).filter((id) => this.panelOpen[id])
+      if (marks.length) {
+        this.panelCollapsed = {
+          ...this.panelCollapsed,
+          ...Object.fromEntries(marks.map((id) => [id, true]))
+        }
+      }
+      return later
+    },
+
+    /**
+     * Whether the recording the URL names can be opened again, and how.
+     *
+     * A directory handle kept in IndexedDB survives a reload; the permission
+     * grant attached to it may or may not, and that is the whole question. A
+     * grant that persisted means the file can simply be opened, and the reload
+     * lands more or less where it left off. A grant that did not means the
+     * browser wants a gesture first, and there is no honest way around that --
+     * so it becomes a button rather than a prompt nobody asked for.
+     */
+    async resumeFromUrl () {
+      const want = this.resumeTarget
+      if (!want) return
+      try {
+        // Only the directory route leaves anything behind to reopen with, and a
+        // browser without it cannot have written this fragment to begin with.
+        if (!canPickDirectory()) return this.cancelResume()
+        const handle = await loadDirectoryHandle()
+        // What the browser kept is the last folder *browsed*, which need not be
+        // the one this fragment was written against -- another tab may have
+        // moved on since. A name is all a directory handle offers to compare,
+        // and guessing wrong would open a different recording of the same name.
+        if (!handle || handle.name !== want.file.dir) return this.cancelResume()
+        const state = await directoryPermission(handle, false)
+        if (state === 'granted') await this.resumeNow(handle)
+        else if (state === 'prompt') this.resumePrompt = { name: want.file.name, dir: want.file.dir }
+        else this.cancelResume()
+      } catch {
+        // No IndexedDB, a private window, a storage policy: all of them mean
+        // the same thing here, which is that there is nothing to go back to.
+        this.cancelResume()
+      }
+    },
+    /** Reopens the file by name -- one round trip, no folder listing. */
+    async resumeNow (handle) {
+      const want = this.resumeTarget
+      if (!want) return
+      // Something got there first: a file dropped on the page while the
+      // permission check was in flight, or one the OS handed over. That is the
+      // recording somebody actually asked for.
+      if (this.state.status !== 'idle') return this.cancelResume()
+      this.resumePrompt = null
+      try {
+        const file = await openFileNamed(handle, want.file.name)
+        this.folderKnown = true
+        await this.openFile(file, 'library', {
+          ref: { dir: handle.name, name: want.file.name },
+          resume: {
+            time: want.time,
+            playing: want.playing,
+            panels: want.deferred,
+            collapsed: want.collapsed
+          }
+        })
+      } catch (e) {
+        // Renamed, moved, deleted, or on a share that is no longer mounted.
+        this.cancelResume()
+        this.showNotice(`${want.file.name} could not be reopened: ${(e && e.message) || e}`)
+      }
+    },
+    /** The Resume button: the click is the user activation the browser wanted. */
+    async acceptResume () {
+      const want = this.resumeTarget
+      if (!want) {
+        this.resumePrompt = null
+        return
+      }
+      const handle = await loadDirectoryHandle()
+      if (!handle || handle.name !== want.file.dir) return this.cancelResume()
+      const state = await directoryPermission(handle, true)
+      if (state !== 'granted') {
+        this.showNotice(`Access to ${want.file.dir} was declined, so ${want.file.name} was not reopened.`)
+        return
+      }
+      await this.resumeNow(handle)
+    },
+    /** Nothing to go back to, so the URL stops claiming there is. */
+    cancelResume () {
+      if (!this.resumeTarget && !this.resumePrompt) return
+      this.resumeTarget = null
+      this.resumePrompt = null
+      this.syncUrl()
     },
 
     // ----------------------------------------------------------------- misc

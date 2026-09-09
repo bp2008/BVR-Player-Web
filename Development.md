@@ -798,6 +798,115 @@ what an *open* wants, since the next open overwrites it a moment later. Going
 back has nothing coming after it, so the state has to be reset as well or the app
 would keep showing the recording's chrome over an empty canvas.
 
+### The URL, and coming back to where you were
+
+The address bar carries the state of the app: which recording is open, where the
+playhead is, whether it was playing, and how the panels were arranged. A reload,
+an accidental <kbd>Ctrl</kbd>+<kbd>R</kbd>, a crashed tab restored a week later
+— all of them come back to roughly where they left off, and a bookmark is a
+bookmark of a moment in a recording rather than of the start screen.
+
+A fragment, deliberately, and not a query string. It never reaches a server, so
+nothing about which recordings someone is reviewing ends up in an access log; it
+is invisible to the service worker's cache lookup, so a page carrying state is
+still the cached page; and it is the one half of a URL a page may rewrite
+without the browser calling it a navigation.
+
+```
+#f=eastwide.20260825_213221Z.bvr&d=BlueIris&t=93.417&play=1&left=settings&right=metadata,export&collapsed=export
+```
+
+| key | meaning |
+|---|---|
+| `f` | the recording's file name |
+| `d` | the folder it was opened from, by name |
+| `t` | the playhead, in seconds to the millisecond |
+| `play` | present when it was playing |
+| `left`, `right` | the open panels, in the order they stack down each dock |
+| `collapsed` | which of those the viewer had collapsed to its title bar |
+
+`f` and `d` are written only for a recording the page could actually find again:
+one picked out of a folder opened with `showDirectoryPicker()`, whose handle the
+browser keeps in IndexedDB. A file that was dropped on the page, chosen from the
+file picker or handed over by the OS leaves nothing behind to reopen, so it is
+left out of the URL entirely — and with it the playhead, which would only
+describe a recording that cannot be put back on screen. A `webkitdirectory`
+listing is in the same position: the `File` objects it produced are the only
+reference to those bytes there will ever be, and they do not survive the page.
+
+#### One writer, and how often it writes
+
+`App.syncUrl` is the only thing that writes the URL, and it is called from
+everywhere something changes: the panel watchers, the play/pause and status
+watchers, and `state.currentTime`, which moves sixty times a second. Deciding
+which of those are worth a rewrite is `syncUrl`'s job rather than its callers',
+because the alternative is the same throttling rule copied into a dozen places
+and disagreeing with itself in two of them.
+
+`sessionHash` returns the fragment and, separately, the same fragment without the
+playhead in it. Comparing the first says whether anything changed at all;
+comparing the second says whether what changed was only the position. A fragment
+identical to the one already there is dropped. One that differs only in the
+playhead waits out `URL_SYNC_MS` (2 s) — with a single trailing timer, so the
+last position of a scrub still lands rather than being thrown away because it
+happened to fall inside the window. Anything else — a pause, a panel, a file —
+goes out immediately, and takes the current playhead with it. So the position is
+never more than two seconds stale, and is exact whenever anything else happened.
+
+`history.replaceState` rather than `pushState`: a back button that walks
+backwards through a recording two seconds at a time is not a feature. It is also
+refused outright on `file://`, where the document's origin is opaque, so there
+the fragment is set directly instead — a same-document navigation, which reloads
+nothing.
+
+#### Reading it back
+
+`App.restoreFromUrl` runs once, from `mounted`. Panels go back immediately: they
+cost nothing and need no permission. The metadata and export panels are
+descriptions of a recording, though, so before there is one they cannot be
+opened at all — `openUrlPanels` returns them as deferred, and `onFileReady`
+opens them the moment the index is built. Sides and dock order are written
+through to the saved settings rather than kept alongside them, because the URL
+is the more recent record of the two: it was written by this app the last time
+those panels were touched.
+
+The recording is a question the browser has to be asked. The directory handle in
+IndexedDB survives a reload; the permission grant attached to it may or may not,
+and that is the whole difference between the two paths:
+
+- **The grant persisted.** `queryPermission()` says `granted`, the file is
+  opened by name — `dir.getFileHandle(name)`, one round trip, no folder listing
+  — and the reload lands where it left off, playing or paused as the URL said.
+- **The grant did not.** Re-granting needs a user gesture, and there is no
+  honest way around that. It becomes a **Resume** button on the start screen
+  rather than a prompt nobody asked for, exactly as the folder browser's own
+  **Grant access** button does for a listing.
+
+Until that settles, the URL keeps describing the recording it is waiting on
+rather than the empty player in front of it. Otherwise the first write after
+load would erase the very thing the Resume button exists to act on, and a second
+reload would land on a blank start screen.
+
+The folder is checked by name before anything is opened. What the browser kept
+is the last folder *browsed*, which need not be the one this fragment was
+written against — a second tab may have moved on since — and guessing wrong
+would silently open a different recording that happens to share a name. A
+mismatch, a missing handle, a browser with no `showDirectoryPicker()`, a file
+that has since been renamed or deleted: all of them end the same way, with the
+resume abandoned and the URL tidied up to describe what is actually on screen.
+
+Anything the viewer does themselves wins over a pending resume. A file dropped
+on the page while the permission check is in flight, or one the OS hands over
+through the launch queue, is the recording somebody actually asked for, so
+`openFile` cancels the resume rather than racing it.
+
+Two things are deliberately not restored. A popped-out panel comes back docked
+on the side it came from: a page reopening pop-up windows by itself is precisely
+what a pop-up blocker exists to stop. And dock widths stay in `localStorage`
+where they already were — they are a preference about this screen, not a
+description of this recording, and a URL opened on a different monitor should
+not carry them.
+
 ### Exporting to MP4
 
 **Export** writes an MP4 of the whole recording or a trimmed range, in one of two

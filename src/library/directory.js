@@ -323,6 +323,20 @@ export async function openEntry (entry) {
 }
 
 /**
+ * One named file out of a directory, without listing the directory.
+ *
+ * Reopening the recording a URL names is the one case where the whole folder is
+ * beside the point: the name is already known, and asking for it by name is a
+ * single round trip where enumerating to find it is the minutes-long walk the
+ * rest of this module exists to avoid. A file that has since been renamed,
+ * moved or deleted comes back as a NotFoundError, which is the caller's answer.
+ */
+export async function openFileNamed (dir, name) {
+  const handle = await dir.getFileHandle(name)
+  return handle.getFile()
+}
+
+/**
  * Whether a stored directory handle can still be read.
  *
  * A handle persisted in IndexedDB survives a reload but its permission grant may

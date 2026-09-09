@@ -43,6 +43,11 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Settings | gear button | |
 | Close a panel | its &times; | <kbd>Esc</kbd> |
 
+The address bar keeps the recording, the playhead and the panel layout, so a
+reload or a bookmark comes back to where you were. Reopening the file needs the
+folder permission the browser may or may not have kept; where it has not, the
+start screen offers a **Resume** button.
+
 The controls fade out while the pointer sits still; turn on **Always show the
 controls** in the settings panel to keep them up, or turn off **Play button over
 the picture** to be rid of the play badge a paused recording shows.

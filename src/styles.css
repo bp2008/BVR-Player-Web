@@ -597,6 +597,39 @@ body {
   gap: 9px;
 }
 
+/* The offer to reopen the recording the URL names. Above the ordinary
+   buttons and separated from them, because it is about this page in
+   particular rather than about opening a file in general. */
+
+.dropzone__resume {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding-bottom: 4px;
+}
+
+.dropzone__resumename {
+  display: block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropzone__resumetext {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.dropzone__resumetext strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
 .dropzone__warn {
   display: flex;
   align-items: center;
