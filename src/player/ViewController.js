@@ -27,6 +27,8 @@ const PAGE_HEIGHT = 400
 // Past this a press is a pan, not a click.
 const DRAG_SLOP = 4
 
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
+
 export class ViewController {
   constructor ({ element, renderer, onChange }) {
     this.element = element
@@ -91,7 +93,25 @@ export class ViewController {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top }
   }
 
-  _onWheel (event) {
+  _onWheel (event) { this.wheel(event) }
+
+  /**
+   * Zooms from a wheel event, wherever it was aimed.
+   *
+   * Public because the chrome hands its own wheel events here. The control bar,
+   * the centre play button and the top bar all sit over the picture, and a
+   * wheel that lands on one of them was aimed at the video underneath: there is
+   * nothing on any of them a wheel means anything else to, and having the zoom
+   * die wherever a button happens to be reads as the gesture being flaky rather
+   * than as the button declining it.
+   *
+   * The anchor is held inside the viewport for the same reason it is taken from
+   * the pointer at all -- so the content under the cursor stays put. Chrome that
+   * overhangs the canvas would otherwise anchor a zoom outside the picture, and
+   * the clamp turns that into the nearest edge, which is where the pointer
+   * visually is.
+   */
+  wheel (event) {
     if (!this.renderer.geometry) return
     event.preventDefault()
     let dy = event.deltaY
@@ -103,8 +123,10 @@ export class ViewController {
     // the page feel stuck.
     if ((next <= MIN_ZOOM && this.renderer.view.zoom <= MIN_ZOOM) ||
         (next >= MAX_ZOOM && this.renderer.view.zoom >= MAX_ZOOM)) return
-    const p = this._local(event)
-    this.renderer.zoomAt(next, p.x, p.y)
+    const rect = this.element.getBoundingClientRect()
+    const x = clamp(event.clientX - rect.left, 0, rect.width)
+    const y = clamp(event.clientY - rect.top, 0, rect.height)
+    this.renderer.zoomAt(next, x, y)
     this._changed()
   }
 

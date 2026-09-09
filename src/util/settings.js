@@ -26,6 +26,12 @@ export const DEFAULT_SETTINGS = {
   // turned off and the chrome pinned open for good.
   alwaysShowControls: false,
 
+  // The play badge over the middle of a paused picture. On by default -- a
+  // paused video without one is the surprising shape -- but it covers the part
+  // of the frame most likely to hold whatever is being looked at, and the
+  // control bar has the same button a few pixels away, so it can be turned off.
+  bigPlayButton: true,
+
   // A pair of buttons that jump between the moments the main stream starts up.
   // Off by default: on most recordings the two streams cover the same hour and
   // the buttons would sit there permanently dead, and the ones they do suit are

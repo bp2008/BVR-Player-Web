@@ -17,7 +17,8 @@ BVR-Player-Web. For what the app is and how to drive it, see
 
 The skip interval (default 10 s), whether a recording starts playing when it is
 opened (it does), time display (elapsed or wall clock), loop, playback speed,
-whether the controls stay on screen rather than fading out, whether the
+whether the controls stay on screen rather than fading out, whether the play
+badge is drawn over a paused picture (it is), whether the
 main-stream jump buttons are shown, overlay drawing, whether scrubbing decodes the exact frame rather than the
 nearest key frame (it does), whether playback pauses while you seek, and — for dual-stream
 recordings — the main/sub stream selection and whether the two are shown in the
@@ -70,6 +71,26 @@ chrome back at once — the timer that hid it has already run and there is nothi
 left to cancel — so the setting is watched, and both directions go through
 `wakeUi()`: on, it reappears and no new timer is armed; off, the fade starts
 again without waiting for the next pointer move.
+
+#### The play badge, and who else the wheel belongs to
+
+A paused recording draws a large play button over the middle of the picture.
+**Play button over the picture** turns it off. It stays on by default — a paused
+video with nothing on it to press is the surprising shape, and it is the one
+target big enough to hit on a phone — but the middle of the frame is where
+whatever is being looked at usually is, and for anyone working through stills the
+badge is in the way rather than an invitation. Nothing is lost by turning it off:
+the same button sits in the control bar, the picture itself is clickable, and
+<kbd>Space</kbd> does it from anywhere.
+
+The top bar, the control bar and that badge all float over the video, so a wheel
+aimed at the picture lands on one of them whenever the pointer is near an edge or
+in the middle — and the zoom, which lives on the canvas underneath, never saw it.
+That read as the gesture being unreliable rather than as the chrome declining it,
+since none of the three has any use for a wheel of its own. All three now hand
+their wheel events to `ViewController.wheel()`, which is the same entry point the
+canvas listener uses. The anchor is clamped into the canvas — chrome is allowed to
+overhang it — so the zoom still holds still whatever is under the cursor.
 
 #### Fitting the row, and the size of what is in it
 
@@ -146,6 +167,42 @@ a recording with minutes between key frames. Frames keep arriving for as long as
 you hold the pointer down — a picture already being decoded is never thrown away
 to chase a newer position, because seeing every few frames of what you dragged
 past beats seeing none of it.
+
+#### Seeking to an exact time
+
+Clicking the position in the control-bar readout pauses and opens a small dialog
+that takes a timestamp. The scrub bar is a couple of pixels per minute of
+recording, which is right for finding roughly where something is and useless for
+going back to the frame a colleague quoted; this is the other half of the same
+job.
+
+It accepts both readings the control bar offers, to the millisecond, in the
+shapes the app already writes them in — `1:04:31.500` elapsed, or
+`2026-08-24 14:39:30.250` on the clock — and opens on whichever the readout is
+currently showing. `parseTime` and `parseClock` in `util/format.js` read them
+back; each accepts what its `format*` counterpart writes plus the loosenings
+anyone typing one reaches for anyway (a bare count of seconds, a leading field
+past its usual range, a `T` between the halves, seconds or milliseconds left
+off). The clock reading is only offered where the recording says when it started,
+which rules out MP4s. Switching between the two carries the position across, not
+the text.
+
+Pausing is half the feature. Typing a timestamp takes seconds, and a recording
+left running underneath would have moved the playhead somewhere else by the time
+the answer was entered — so the position the dialog opened on would no longer be
+the one it was offering to edit.
+
+A line under the field always says where **Go** will land, because for most of
+the keystrokes a timestamp takes the field holds something unreadable, and a
+field that only complains once you submit is worse than one that keeps up. The
+clip is the bound: something readable outside it lands on the nearest end, and
+the line says so rather than refusing. A value one frame past the end is a real
+answer to "where does this stop", and there is nowhere else it could have meant.
+
+It is a dialog, which the rest of the app avoids — export and the metadata
+inspector became panels for good reasons (see *What the docked panels replaced*).
+The distinction is that those describe a recording for as long as it is open,
+while this is one field answered once; a panel would outlive the question.
 
 ### Playback speed
 

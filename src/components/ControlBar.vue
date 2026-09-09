@@ -101,7 +101,16 @@
       />
 
       <div class="readout">
-        <span class="readout__time">{{ primaryTime }}</span>
+        <!-- The position is the one reading that is also a question: clicking it
+             asks which moment you meant. Everything beside it stays plain text,
+             since none of the rest is somewhere you could go. -->
+        <button
+          type="button"
+          class="readout__time"
+          title="Seek to a specific time"
+          aria-label="Seek to a specific time"
+          @click="$emit('seek-to')"
+        >{{ primaryTime }}</button>
         <span class="readout__sep">/</span>
         <span class="readout__total">{{ totalTime }}</span>
         <span class="readout__frame">frame {{ (state.frameIndex + 1).toLocaleString() }} of {{ state.frameCount.toLocaleString() }}</span>
@@ -212,9 +221,9 @@ export default {
     trim: { type: Object, default: null }
   },
   emits: [
-    'toggle-play', 'skip', 'step', 'seek', 'scrubbing', 'volume', 'toggle-mute',
-    'toggle-fullscreen', 'stream', 'menu-open', 'rate', 'reset-zoom',
-    'toggle-panel', 'trim', 'snapshot'
+    'toggle-play', 'skip', 'step', 'seek', 'seek-to', 'scrubbing', 'volume',
+    'toggle-mute', 'toggle-fullscreen', 'stream', 'menu-open', 'rate',
+    'reset-zoom', 'toggle-panel', 'trim', 'snapshot'
   ],
   data () {
     return {
@@ -464,6 +473,29 @@ export default {
 	.readout > *:first-child {
 		margin-left: 0px;
 	}
+
+/* A button that reads as the text it replaced until it is pointed at. The
+   descendant selector is there to out-weigh `.readout > *:first-child` above,
+   which would otherwise take the padding's indent back out of the row. */
+.readout > .readout__time {
+  padding: 1px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.readout__time:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.readout__time:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
 .readout__sep,
 .readout__total {

@@ -117,16 +117,17 @@
         </div>
 
         <button
-          v-if="hasFile && !state.playing && state.status === 'ready' && !state.buffering"
+          v-if="showBigPlay"
           type="button"
           class="bigplay"
           aria-label="Play"
           @click.stop="togglePlay"
+          @wheel="onChromeWheel"
         >
           <AppIcon name="play" :size="42" />
         </button>
 
-        <header class="topbar">
+        <header class="topbar" @wheel="onChromeWheel">
           <div class="topbar__left">
             <AppIcon name="film" :size="18" />
             <span class="topbar__name">{{ state.fileName || 'BVR Player' }}</span>
@@ -179,6 +180,18 @@
           @trim="onTrim"
           @menu-open="onMenuOpen"
           @snapshot="saveSnapshot"
+          @seek-to="openSeekDialog"
+          @wheel="onChromeWheel"
+        />
+
+        <SeekDialog
+          v-if="seekOpen"
+          :current-time="state.currentTime"
+          :duration="state.duration"
+          :start-utc="state.startUtc"
+          :initial-mode="settings.timeDisplay"
+          @seek="onSeekDialog"
+          @close="seekOpen = false"
         />
 
         <!-- One element per snapshot, each running its own animation and each
@@ -299,6 +312,7 @@ import ExportMetadataMenu from './components/ExportMetadataMenu.vue'
 import ExportPanel from './components/ExportPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import PanelFrame from './components/PanelFrame.vue'
+import SeekDialog from './components/SeekDialog.vue'
 import { BvrPlayer, createBlankState, PLAYBACK_RATES } from './player/BvrPlayer.js'
 import { ViewController } from './player/ViewController.js'
 import { adjacentMainStart, mainStartPoints } from './player/coverage.js'
@@ -345,7 +359,7 @@ export default {
   name: 'App',
   components: {
     AppIcon, ControlBar, FolderBrowser, MetadataPanel, ExportPanel, SettingsPanel, PanelFrame,
-    ExportMetadataMenu
+    ExportMetadataMenu, SeekDialog
   },
   data () {
     const settings = loadSettings()
@@ -362,6 +376,8 @@ export default {
       pointerOverChrome: false,
       installPrompt: null,
       libraryOpen: false,
+      // The "seek to a time" dialog. Not a panel: see SeekDialog.vue.
+      seekOpen: false,
       // Whether there is a folder to go back to. Escape returns to the browser
       // wherever there is one, which means remembering that a folder was opened
       // even by the `webkitdirectory` route, where there is no handle to keep.
@@ -437,6 +453,20 @@ export default {
     hasFile () {
       return this.state.status === 'ready' || this.state.status === 'loading' || this.state.status === 'error'
     },
+    /**
+     * Whether the big play button over the middle of the picture is drawn.
+     *
+     * It is only ever shown on a paused, ready recording, and it is optional on
+     * top of that: it sits over the part of the frame most likely to hold the
+     * thing being looked at, and for anyone reviewing stills that is a badge in
+     * the way rather than an invitation. On by default all the same -- a paused
+     * video with no play button on it is the surprising one.
+     */
+    showBigPlay () {
+      if (!this.settings.bigPlayButton) return false
+      if (this.seekOpen) return false
+      return this.hasFile && !this.state.playing && this.state.status === 'ready' && !this.state.buffering
+    },
     overlayShow () {
       return {
         shapes: this.settings.overlayShapes,
@@ -499,6 +529,9 @@ export default {
     },
     'state.status' (status) {
       this.wakeUi()
+      // Nothing to seek within any more, and the bounds it was offering belong
+      // to a recording that is no longer open.
+      if (status !== 'ready') this.seekOpen = false
       if (status === 'ready') this.onFileReady()
       else if (status !== 'loading') this.closeFilePanels()
     },
@@ -733,6 +766,39 @@ export default {
     jumpMainStart (dir) {
       const target = adjacentMainStart(mainStartPoints(this.state.coverage), this.state.currentTime, dir)
       if (target !== null) this.onSeek(target, false)
+    },
+    /**
+     * Opens the "seek to a time" dialog, paused.
+     *
+     * Pausing is the point as much as the dialog is: typing a timestamp takes
+     * seconds, and a recording left running underneath would have carried the
+     * playhead somewhere else by the time the answer was entered -- so the
+     * position the dialog opened on would no longer be the one it was offering
+     * to edit.
+     */
+    openSeekDialog () {
+      if (this.state.status !== 'ready') return
+      if (this.state.playing) this.player.pause()
+      this.seekOpen = true
+      this.wakeUi()
+    },
+    onSeekDialog (ms) {
+      this.seekOpen = false
+      this.onSeek(ms, false)
+    },
+    /**
+     * A wheel that landed on the chrome, handed to the zoom underneath it.
+     *
+     * The top bar, the control bar and the centre play button all float over the
+     * picture, so a wheel aimed at the video hits one of them whenever the
+     * pointer happens to be near an edge or in the middle. None of them has any
+     * use for a wheel of their own, and the gesture dying wherever they happen to
+     * be reads as the zoom being unreliable. See ViewController.wheel.
+     */
+    onChromeWheel (event) {
+      if (!this.view || this.state.status !== 'ready') return
+      this.view.wheel(event)
+      this.wakeUi(event)
     },
     onScrubbing (on) {
       this.scrubbing = on
@@ -1260,7 +1326,7 @@ export default {
       if (this.settings.alwaysShowControls) return false
       if (!this.hasFile || this.state.status !== 'ready') return false
       if (this.menuOpen || this.scrubbing || this.pointerOverChrome) return false
-      if (this.libraryOpen || this.dragging || this.resizeDrag) return false
+      if (this.libraryOpen || this.seekOpen || this.dragging || this.resizeDrag) return false
       return !this.chromeHasKeyboardFocus()
     },
     /**
@@ -1329,8 +1395,9 @@ export default {
       event.preventDefault()
       event.stopPropagation()
       // The folder browser covers the whole window and opening it pauses, so
-      // there is nothing behind it for Space to act on.
-      if (this.libraryOpen) return
+      // there is nothing behind it for Space to act on; the seek dialog opens
+      // paused for the same reason and its buttons answer to Enter.
+      if (this.libraryOpen || this.seekOpen) return
       this.togglePlay()
       this.wakeUi()
     },
@@ -1352,7 +1419,7 @@ export default {
       // are turned on: that setting is about what the control row has room for,
       // not about whether the feature is there. Held with Ctrl so the keys they
       // borrow -- frame step and skip -- keep their unmodified meaning.
-      if (event.ctrlKey && !event.metaKey && !event.altKey && !this.libraryOpen) {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && !this.libraryOpen && !this.seekOpen) {
         const dir = MAIN_JUMP_KEYS[event.key]
         if (dir) {
           this.jumpMainStart(dir)
@@ -1366,6 +1433,13 @@ export default {
       // The folder browser covers the whole window; only its own Escape applies.
       if (this.libraryOpen) {
         if (event.key === 'Escape') { this.libraryOpen = false; event.preventDefault() }
+        return
+      }
+
+      // Same for the seek dialog. Its own field handles Escape before this ever
+      // runs; this is the case where focus has moved to one of its buttons.
+      if (this.seekOpen) {
+        if (event.key === 'Escape') { this.seekOpen = false; event.preventDefault() }
         return
       }
 

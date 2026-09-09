@@ -44,6 +44,33 @@ export function formatUtc (utcMs, showMs = true) {
   return showMs ? `${date} ${time}.${pad(d.getMilliseconds(), 3)}` : `${date} ${time}`
 }
 
+/**
+ * Reads a wall-clock date and time back into a Unix-ms timestamp, or null.
+ *
+ * The mirror of formatUtc, and in the same zone it writes in -- the viewer's
+ * own. It accepts what formatUtc produces, `2026-08-25 17:00:00.000`, plus the
+ * loosenings anyone editing one makes anyway: a `T` between the halves, a comma
+ * for the decimal point, and the seconds or the milliseconds simply left off.
+ *
+ * Null rather than a guess for anything unreadable, and null too for a date
+ * that does not exist -- 31 February, or an hour a daylight-saving jump skipped
+ * over. A Date built from out-of-range fields rolls quietly forward into the
+ * next real one, so the only way to tell is to read the fields back.
+ */
+export function parseClock (text) {
+  if (typeof text !== 'string') return null
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})[T ]+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:[.,](\d{1,3}))?$/
+    .exec(text.trim())
+  if (!m) return null
+  const [y, mo, d, h, mi] = m.slice(1, 6).map(Number)
+  const s = m[6] ? Number(m[6]) : 0
+  const ms = m[7] ? Number(m[7].padEnd(3, '0')) : 0
+  const date = new Date(y, mo - 1, d, h, mi, s, ms)
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d ||
+      date.getHours() !== h || date.getMinutes() !== mi || date.getSeconds() !== s) return null
+  return date.getTime()
+}
+
 export function formatBytes (n) {
   if (!n) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

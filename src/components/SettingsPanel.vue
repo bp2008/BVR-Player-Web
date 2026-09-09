@@ -81,6 +81,21 @@
 
     <label class="spanel__row spanel__row--toggle">
       <span class="spanel__label">
+        Play button over the picture
+        <em class="spanel__sub">{{ bigPlaySummary }}</em>
+      </span>
+      <input
+        type="checkbox"
+        class="spanel__check"
+        :checked="settings.bigPlayButton"
+        @change="emitPatch({ bigPlayButton: $event.target.checked })"
+        @keydown.stop
+        @dblclick.stop
+      />
+    </label>
+
+    <label class="spanel__row spanel__row--toggle">
+      <span class="spanel__label">
         Main-stream jump buttons
         <em class="spanel__sub">{{ mainJumpSummary }}</em>
       </span>
@@ -379,6 +394,12 @@ export default {
       return this.settings.alwaysShowControls
         ? 'The top bar and control bar stay on screen, over the picture'
         : 'They fade out while the pointer sits still, and come back when it moves'
+    },
+    /** Says where the same button still is, since this only removes one of two. */
+    bigPlaySummary () {
+      return this.settings.bigPlayButton
+        ? 'A large play badge appears over a paused recording'
+        : 'Off; play from the control bar, the picture itself or Space'
     },
     /**
      * Says whether the buttons would have anywhere to go in the file that is

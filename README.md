@@ -29,6 +29,7 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Previous / next frame | ⏮ / ⏭ buttons | <kbd>,</kbd> / <kbd>.</kbd> (or <kbd>Shift</kbd>+arrow) |
 | Jump to next/previous main stream start | optional, buttons appear next to `Previous / next frame` | <kbd>Ctrl</kbd>+<kbd>,</kbd> / <kbd>Ctrl</kbd>+<kbd>.</kbd> (or <kbd>Ctrl</kbd>+arrow) |
 | Seek | scrub bar | <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>0</kbd>–<kbd>9</kbd> |
+| Seek to an exact time | click the position in the readout | |
 | Playback speed | speed chip | <kbd>[</kbd> / <kbd>]</kbd> |
 | Zoom / pan | wheel, pinch, drag | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>Z</kbd> to reset |
 | Volume / mute | speaker button + slider | <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>M</kbd> |
@@ -43,7 +44,8 @@ additionally need platform HEVC decode support (should work on most modern devic
 | Close a panel | its &times; | <kbd>Esc</kbd> |
 
 The controls fade out while the pointer sits still; turn on **Always show the
-controls** in the settings panel to keep them up.
+controls** in the settings panel to keep them up, or turn off **Play button over
+the picture** to be rid of the play badge a paused recording shows.
 
 ## More
 
