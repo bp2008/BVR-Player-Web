@@ -337,8 +337,8 @@ export class BvrPlayer {
         // a stream whose frames start late in the file is real even though the
         // opening probe never reached it. The sizes _emitProbe published are
         // the bitstream's own and are left alone.
-        hasMainStream: this._present(STREAM_MAIN),
-        hasSubStream: this._present(STREAM_SUB),
+        hasMainStream: this._streamPresent(STREAM_MAIN),
+        hasSubStream: this._streamPresent(STREAM_SUB),
         switchingMode: this.index.switchingMode,
         autoStreams: autoStreamSources(this.index, this.header, this._playable(), this._probedSizes()),
         coverage: fileCoverage(this.index, this._headerIntervalMs())
@@ -454,7 +454,7 @@ export class BvrPlayer {
     // "not here, not yet" -- so it is worded as one.
     if (!initial && !quiet && effective !== mode) {
       const absent = this._streaming && mode !== 'auto' &&
-        this._present(mode === 'sub' ? STREAM_SUB : STREAM_MAIN) &&
+        this._streamPresent(mode === 'sub' ? STREAM_SUB : STREAM_MAIN) &&
         this._streamPlayable(mode === 'sub' ? STREAM_SUB : STREAM_MAIN)
       this.onNotice(absent
         ? `The ${mode} stream is not recorded across this part of the file \u2014 showing the ${pstream.streamLabel.toLowerCase()} until it is.`
@@ -559,7 +559,7 @@ export class BvrPlayer {
    * only ever interesting on a streaming one -- where the window's tables
    * describe a stretch of the file and `knownStreams` describes the file.
    */
-  _present (si) {
+  _streamPresent (si) {
     if (this.index && this.index.streaming && this.index.knownStreams) {
       return this.index.knownStreams()[si]
     }
@@ -1305,8 +1305,8 @@ export class BvrPlayer {
       frameCountKnown: this._frameCountKnown(),
       marks,
       segments,
-      hasMainStream: this._present(STREAM_MAIN),
-      hasSubStream: this._present(STREAM_SUB),
+      hasMainStream: this._streamPresent(STREAM_MAIN),
+      hasSubStream: this._streamPresent(STREAM_SUB),
       indexedFrom: this.index.coveredFromMs,
       indexedTo: this.index.coveredToMs,
       indexComplete: !!this.index.complete
@@ -1347,8 +1347,8 @@ export class BvrPlayer {
           this.probe = summarizeProbe(streams)
           this._emitProbe()
           this._emit({
-            hasMainStream: this._present(STREAM_MAIN),
-            hasSubStream: this._present(STREAM_SUB),
+            hasMainStream: this._streamPresent(STREAM_MAIN),
+            hasSubStream: this._streamPresent(STREAM_SUB),
             autoStreams: autoStreamSources(this.index, this.header, this._playable(), this._probedSizes())
           })
           this._reconsiderStream()
