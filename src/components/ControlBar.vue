@@ -113,7 +113,14 @@
         >{{ primaryTime }}</button>
         <span class="readout__sep">/</span>
         <span class="readout__total">{{ totalTime }}</span>
-        <span class="readout__frame">frame {{ (state.frameIndex + 1).toLocaleString() }} of {{ state.frameCount.toLocaleString() }}</span>
+        <!-- Only where the frame table covers the whole recording. A streamed
+             file is indexed a window at a time, so its frame numbers count from
+             wherever the window starts and change under the reader; saying
+             nothing is the only honest thing left. -->
+        <span
+          v-if="state.frameCountKnown"
+          class="readout__frame"
+        >frame {{ (state.frameIndex + 1).toLocaleString() }} of {{ state.frameCount.toLocaleString() }}</span>
       </div>
 
       <!-- Everything that belongs at the far end, kept together so that when the
@@ -306,7 +313,8 @@ export default {
       return [
         s.status, s.buffering, s.zoomed, this.rateLabel, this.showStreamChip,
         this.streamChip, this.panelButtons.length, this.settings.mainStreamJumps,
-        this.skipLabel, this.primaryTime.length, this.totalTime.length, s.frameCount
+        this.skipLabel, this.primaryTime.length, this.totalTime.length,
+        s.frameCountKnown ? s.frameCount : 0
       ].join('|')
     }
   },

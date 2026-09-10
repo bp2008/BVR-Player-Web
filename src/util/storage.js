@@ -1,12 +1,15 @@
 import { closeThumbDb, DB_NAME } from '../library/thumbCache.js'
+import { clearCache } from '../remote/opfsPages.js'
 
 /**
  * What this page is using of the browser's own storage, and how to give it back.
  *
  * Everything the player keeps is kept locally -- thumbnails and folder listings
- * in IndexedDB, settings in `localStorage`, the app itself in a service-worker
- * cache -- and a folder of several thousand recordings turns that into something
- * worth being able to see and to clear. The browser offers no obvious way in:
+ * in IndexedDB, settings in `localStorage`, downloaded pieces of recordings
+ * played over the network in the origin private file system, the app itself in a
+ * service-worker cache -- and a folder of several thousand recordings, or an
+ * evening of remote ones, turns that into something worth being able to see and
+ * to clear. The browser offers no obvious way in:
  * site data is buried several menus deep and is described in terms of origins
  * rather than of the page someone is looking at.
  *
@@ -50,7 +53,7 @@ export async function storageUsage () {
  */
 export async function clearSiteData () {
   closeThumbDb()
-  await Promise.all([clearDatabases(), clearCaches(), clearWorkers()])
+  await Promise.all([clearDatabases(), clearCaches(), clearWorkers(), clearCache()])
   try { localStorage.clear() } catch { /* unavailable in some private modes */ }
   try { sessionStorage.clear() } catch { /* the same */ }
   clearCookies()

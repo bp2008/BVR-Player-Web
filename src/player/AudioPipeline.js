@@ -91,6 +91,25 @@ export class AudioPipeline {
     return true
   }
 
+  /**
+   * Rebuilds the packet timing table after a streaming index has changed.
+   *
+   * `prepare` works out when each packet begins from the whole table, so a table
+   * that has grown leaves it describing fewer packets than there now are -- and
+   * the fill loop, which walks to `index.audio.count`, would run off the end of
+   * it. Growth keeps packet indices stable, so the cursor survives; a re-anchor
+   * does not, and says so.
+   */
+  refresh (reset) {
+    if (!this.available) return
+    if (reset) {
+      this._epoch++
+      this._cursor = 0
+      this._needsResync = true
+    }
+    this.prepare()
+  }
+
   /** Lazily creates the AudioContext; must be called from a user gesture. */
   async ensureContext () {
     if (!this.available) return null

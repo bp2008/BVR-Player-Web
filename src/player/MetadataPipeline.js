@@ -53,6 +53,27 @@ export class MetadataPipeline {
     this._want = null
   }
 
+  /**
+   * Picks up the records a streaming index has since read.
+   *
+   * The definition record is written once at the front of the file (spec 7.1)
+   * and the streaming index keeps hold of it whatever its window does, so the
+   * definitions never need loading twice. The update records do change: growth
+   * appends to the list, which leaves earlier positions -- and therefore the
+   * cache and the fold-forward cursor -- meaning what they meant. A re-anchor
+   * replaces the list wholesale, so both are dropped.
+   */
+  refresh (index, reset) {
+    this.index = index
+    this.defRecord = index.metadata.find((m) => m.subtype === 1) || this.defRecord
+    this.updates = index.metadata.filter((m) => m.subtype === 2)
+    this.hasRecords = this.updates.length > 0 || !!this.defRecord
+    if (!reset) return
+    this._cache.clear()
+    this._applied = -1
+    this._epoch++
+  }
+
   /** Reads the object definitions. Everything else waits on this. */
   async load () {
     if (this.ready) return

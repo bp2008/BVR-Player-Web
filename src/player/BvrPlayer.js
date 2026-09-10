@@ -2,7 +2,8 @@ import { BlobReader } from '../bvr/blobReader.js'
 import { frameIndexForTime } from '../bvr/indexer.js'
 import { openContainer } from '../container/open.js'
 import {
-  autoStreamSources, buildPlaybackStream, resolveStreamMode, estimateFrameInterval, collectMarkers
+  autoStreamSources, buildPlaybackStream, resolveStreamMode, preferredStream,
+  estimateFrameInterval, collectMarkers
 } from './playbackStream.js'
 import { fileCoverage, gapThreshold } from './coverage.js'
 import { VideoPipeline } from './VideoPipeline.js'
@@ -14,6 +15,7 @@ import { paintOverlay } from './overlayPainter.js'
 import { snapshotOverlay } from '../bvr/metadata.js'
 import { audioCodecLabel } from './audioCodecs.js'
 import { describeNoVideo, streamLabelFor } from '../container/mediaInfo.js'
+import { probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
 import { STREAM_MAIN, STREAM_SUB } from '../bvr/constants.js'
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
@@ -57,11 +59,26 @@ export function createBlankState () {
     container: '',
     playing: false,
     buffering: false,
+    // How much of the recording the frame table actually covers. A local file is
+    // indexed whole, so these end up spanning it; a remote one is indexed a
+    // window at a time, and the scrub bar can say which part is known.
+    indexedFrom: 0,
+    indexedTo: 0,
+    indexComplete: true,
     ended: false,
     currentTime: 0,
     duration: 0,
     frameIndex: 0,
     frameCount: 0,
+    // Whether `frameCount` is the recording's or merely the window's.
+    //
+    // A streaming index counts the frames it has read, which is a number that
+    // grows with every extension and starts again at every seek -- so quoting it
+    // as "of 4,812" told the viewer something that was never true of the file
+    // and was different a second later. Frame numbering only means anything
+    // against a table that covers the whole recording, so where it does not, the
+    // readouts that count in frames say nothing rather than something wrong.
+    frameCountKnown: true,
     volume: 1,
     muted: false,
     hasAudio: false,
@@ -167,7 +184,18 @@ export class BvrPlayer {
     this.container = ''
     this.movie = null
 
+    // What is being played, and what was asked for. They differ where a request
+    // cannot be honoured -- a stream this device has no decoder for, or, on a
+    // remote recording, one that simply is not written across the stretch the
+    // window covers. See `_reconsiderStream`.
     this.streamMode = 'auto'
+    this.requestedMode = 'auto'
+    // Streams whose codec has been read off a key frame the window turned up
+    // later, so a second appearance does not read it again. See
+    // `_probeAppearedStreams`.
+    this._probingStream = [false, false]
+    // Whether a stream change is already under way; one is enough.
+    this._switching = false
     this.matchAspect = true
     this.frameIntervalMs = 33.367
     this.duration = 0
@@ -193,6 +221,12 @@ export class BvrPlayer {
     this.scrubExact = false
     this.pauseWhileSeeking = false
     this._seekStartedAt = 0
+    // Counts seeks that are waiting on the streaming index, so that only the
+    // newest of them acts when its bytes arrive.
+    this._coverSeek = 0
+    // A seek waiting on the streaming index: `{ ms, preview }`, or null. See
+    // `_startSeek` and `_awaitCoverage`.
+    this._coverWait = null
     this._resumeAfterScrub = false
     this.volume = 1
     this.muted = false
@@ -218,7 +252,15 @@ export class BvrPlayer {
 
   // ---------------------------------------------------------------- lifecycle
 
-  async open (file) {
+  /**
+   * `startMs` is where playback is meant to begin.
+   *
+   * It matters only for a remote recording, and there it matters a great deal:
+   * a hand-off carrying a position into the middle of an hour-long clip would
+   * otherwise index its way there from the front, which is the whole download
+   * this player exists to avoid.
+   */
+  async open (file, { startMs = 0 } = {}) {
     this.closeFile()
     const gen = ++this._generation
     this._emit({ ...createBlankState(), status: 'loading', fileName: file.name, fileSize: file.size })
@@ -242,7 +284,15 @@ export class BvrPlayer {
           this._emitProbe()
         },
         onProgress: (p) => { if (gen === this._generation) this._emit({ loadProgress: p }) },
-        shouldStop: () => gen !== this._generation
+        shouldStop: () => gen !== this._generation,
+        // A recording reached over HTTP is indexed a window at a time rather
+        // than end to end; see `src/bvr/streamingIndex.js` for why, and
+        // `_onIndexChange` for what the player does when the window moves.
+        streaming: !!file.remote,
+        startMs,
+        onIndexChange: (change) => {
+          if (gen === this._generation) this._onIndexChange(change)
+        }
       })
       if (gen !== this._generation) return
 
@@ -262,6 +312,9 @@ export class BvrPlayer {
       }
       if (!this.probe.anySupported) throw new Error(this.probe.summary)
 
+      this.requestedMode = this.streamMode
+      this._probingStream = [false, false]
+      this._switching = false
       this.renderer.setOrientation(this.header.rotation, this.header.flipH)
       this.renderer.resetView()
       this._applyDisplayAspect()
@@ -284,8 +337,8 @@ export class BvrPlayer {
         // a stream whose frames start late in the file is real even though the
         // opening probe never reached it. The sizes _emitProbe published are
         // the bitstream's own and are left alone.
-        hasMainStream: this.index.streams[0].count > 0,
-        hasSubStream: this.index.streams[1].count > 0,
+        hasMainStream: this._present(STREAM_MAIN),
+        hasSubStream: this._present(STREAM_SUB),
         switchingMode: this.index.switchingMode,
         autoStreams: autoStreamSources(this.index, this.header, this._playable(), this._probedSizes()),
         coverage: fileCoverage(this.index, this._headerIntervalMs())
@@ -302,12 +355,19 @@ export class BvrPlayer {
     }
   }
 
-  async _selectStream (mode, initial) {
+  async _selectStream (mode, initial, { quiet = false } = {}) {
     const wasPlaying = this._state.playing
     const atTime = initial ? 0 : this.clock.currentTime
 
     const playable = this._playable()
-    const effective = resolveStreamMode(this.index, playable, mode)
+    const effective = this._effectiveMode(mode)
+    // What the viewer asked for, kept apart from what is being played. On a
+    // remote recording the two come apart routinely and legitimately: a main
+    // stream written only while something moved is absent from most windows, so
+    // a request for it is answered with the sub stream until the window reaches
+    // an island of it. Forgetting the request there would mean the main stream
+    // was never shown at all, however far the viewer travelled.
+    this.requestedMode = mode
     this.streamMode = effective
 
     const pstream = buildPlaybackStream(this.index, this.header, effective, playable, this._probedSizes())
@@ -370,6 +430,7 @@ export class BvrPlayer {
     this._emit({
       duration,
       frameCount: pstream.count,
+      frameCountKnown: this._frameCountKnown(),
       frameIndex: startIdx,
       width: pstream.width,
       height: pstream.height,
@@ -378,16 +439,26 @@ export class BvrPlayer {
       streamMode: effective,
       streamLabel: pstream.streamLabel,
       marks,
-      segments
+      segments,
+      indexedFrom: this._streaming ? this.index.coveredFromMs : 0,
+      indexedTo: this._streaming ? this.index.coveredToMs : duration,
+      indexComplete: !this._streaming || !!this.index.complete
     })
     // The reference shape does not change with the stream, but whether *this*
     // stream is being rescaled to reach it does.
     this._applyDisplayAspect()
 
     // On open the codec warning already explains this; only an explicit switch
-    // that could not be honoured needs saying out loud.
-    if (!initial && effective !== mode) {
-      this.onNotice(`The ${mode} stream cannot be decoded on this device \u2014 showing the ${pstream.streamLabel.toLowerCase()} instead.`)
+    // that could not be honoured needs saying out loud. A remote recording has a
+    // second reason for the two to differ, and it is not a refusal but a
+    // "not here, not yet" -- so it is worded as one.
+    if (!initial && !quiet && effective !== mode) {
+      const absent = this._streaming && mode !== 'auto' &&
+        this._present(mode === 'sub' ? STREAM_SUB : STREAM_MAIN) &&
+        this._streamPlayable(mode === 'sub' ? STREAM_SUB : STREAM_MAIN)
+      this.onNotice(absent
+        ? `The ${mode} stream is not recorded across this part of the file \u2014 showing the ${pstream.streamLabel.toLowerCase()} until it is.`
+        : `The ${mode} stream cannot be decoded on this device \u2014 showing the ${pstream.streamLabel.toLowerCase()} instead.`)
     }
 
     if (!initial) {
@@ -479,6 +550,45 @@ export class BvrPlayer {
 
   _playable () {
     return [this._streamPlayable(0), this._streamPlayable(1)]
+  }
+
+  /**
+   * Whether the recording holds a stream at all, as opposed to right here.
+   *
+   * A complete index answers the two questions with the same number, so this is
+   * only ever interesting on a streaming one -- where the window's tables
+   * describe a stretch of the file and `knownStreams` describes the file.
+   */
+  _present (si) {
+    if (this.index && this.index.streaming && this.index.knownStreams) {
+      return this.index.knownStreams()[si]
+    }
+    return !!(this.index && this.index.streams[si].count > 0)
+  }
+
+  /** Whether the frame table being published counts the whole recording. */
+  _frameCountKnown () {
+    return !this._streaming || !!this.index.complete
+  }
+
+  /**
+   * The mode that will actually be played for a given request.
+   *
+   * Streaming plays one stream at a time -- see `preferredStream` -- so an
+   * `auto` request is resolved to whichever stream automatic would have settled
+   * on rather than to a merged sequence.
+   */
+  _effectiveMode (mode) {
+    const playable = this._playable()
+    const resolved = resolveStreamMode(this.index, playable, mode)
+    if (!this._streaming || resolved !== 'auto') return resolved
+    // Two ways to arrive here, and one answer serves both: `auto` was asked for,
+    // or a named stream was asked for and is not available. Either way what gets
+    // played is a single stream, and saying which one is better than reporting
+    // "auto" for a choice that was never automatic.
+    return preferredStream(this.index, this.header, playable, this._probedSizes()) === STREAM_SUB
+      ? 'sub'
+      : 'main'
   }
 
   /** The header's nominal frame interval in ms, as a last-resort fallback. */
@@ -585,6 +695,11 @@ export class BvrPlayer {
   _outOfPictures () {
     const s = this.pstream
     if (!s || s.count === 0) return false
+    // A streaming window ends where reading stopped, not where the recording
+    // does. Sitting on its last frame means the next one has not been read yet,
+    // which is buffering; treating it as the end would stop playback a few
+    // seconds in on every remote clip.
+    if (this._streaming && !this.index.atEof && this.clock.currentTime < this.duration - 1) return false
     const last = s.count - 1
     if (this.curIdx < last) return false
     return this.clock.currentTime - s.ts[last] > this._gapAfter(last) / 2
@@ -740,6 +855,11 @@ export class BvrPlayer {
     if (this.audio) { this.audio.close(); this.audio = null }
     if (this.metadata) { this.metadata.close(); this.metadata = null }
     if (this.reader) { this.reader.release(); this.reader = null }
+    if (this.index && this.index.close) this.index.close()
+    // A remote file holds requests in flight and a handle on its page store;
+    // both have to be let go, and any request still running has to be abandoned
+    // rather than left to spend a viewer's bandwidth on a closed recording.
+    if (this.blob && this.blob.remote && this.blob.close) this.blob.close()
     this.header = null
     this.index = null
     this.probe = null
@@ -750,6 +870,7 @@ export class BvrPlayer {
     this.curIdx = -1
     this.pendingSeek = null
     this.scrubTarget = null
+    this._coverWait = null
     this.duration = 0
     this.gapBySource = [0, 0]
     this._metaAt = null
@@ -864,6 +985,35 @@ export class BvrPlayer {
 
   /** The half of seek() that actually moves the decoder. */
   _startSeek (t, preview) {
+    // A position the window has not read yet cannot be resolved to a frame at
+    // all -- `frameIndexForTime` would clamp to whichever end of the window is
+    // nearer and the player would confidently show the wrong picture. So the
+    // seek waits for the index instead, showing the same buffering state a slow
+    // decode shows, and starts again when the bytes are in.
+    if (this._streaming && !this.index.holds(t)) {
+      this.pendingSeek = null
+      this.clock.setHeld(true)
+      if (!this._state.buffering) this._emit({ buffering: true })
+      // The position is remembered and retested every frame rather than acted on
+      // when one promise settles. `ensure` settles when the window stops moving,
+      // which is not the same as its having reached the target: a re-anchor that
+      // lands short of it, or a read the server answered 503 to, both settle it
+      // early -- and a seek that acted only on that promise sat behind the
+      // buffering chip for good even after the bytes had arrived. The animation
+      // loop is already asking the index to follow the playhead; `_awaitCoverage`
+      // asks the one question that matters, once a frame, until it is true.
+      this._coverWait = { ms: t, preview }
+      const gen = this._generation
+      const seek = ++this._coverSeek
+      // Awaited only for what it throws. A window that cannot be read at all is
+      // the one thing the loop above cannot notice on its own.
+      this.index.ensure(t).catch((e) => {
+        if (gen === this._generation && seek === this._coverSeek) this._onPipelineError(e)
+      })
+      return
+    }
+    this._coverWait = null
+
     const s = this.pstream
     const exactIdx = frameIndexForTime(s, t)
     const idx = preview && !this.scrubExact
@@ -948,7 +1098,7 @@ export class BvrPlayer {
   }
 
   async setStreamMode (mode) {
-    if (!this.index || mode === this.streamMode) return
+    if (!this.index || mode === this.requestedMode) return
     try {
       await this._selectStream(mode, false)
     } catch (e) {
@@ -1108,10 +1258,174 @@ export class BvrPlayer {
     return out
   }
 
+  // ---------------------------------------------------------------- streaming
+
+  /** Whether the frame table only covers part of the recording. */
+  get _streaming () {
+    return !!(this.index && this.index.streaming)
+  }
+
+  /**
+   * The streaming index has read further, or started again somewhere else.
+   *
+   * Growth is the common case and is absorbed rather than rebuilt for: the new
+   * table is the old one plus frames on the end, so the sequence, the decoder's
+   * position and the playhead's index all still mean what they meant, and this
+   * only has to hand the longer table to the parts that hold their own copy.
+   *
+   * A re-anchor is the seek case, and everything counted against the old table
+   * has to be dropped -- but the *sequence* is unchanged (streaming plays one
+   * stream, never a merged one), so the decoders and their configuration are
+   * kept and only their contents are thrown away. That is what makes a seek into
+   * an unread part of an hour-long recording cost a key frame rather than a
+   * pipeline rebuild.
+   */
+  _onIndexChange ({ reanchored }) {
+    if (!this.index || !this.pstream) return
+    const pstream = buildPlaybackStream(
+      this.index, this.header, this.streamMode, this._playable(), this._probedSizes()
+    )
+    if (pstream.count === 0) return
+    this.pstream = pstream
+    if (this.video) this.video.adopt(pstream, reanchored)
+    if (this.audio) this.audio.refresh(reanchored)
+    if (this.metadata) this.metadata.refresh(this.index, reanchored)
+    if (reanchored) {
+      this.curIdx = -1
+      this._metaAt = null
+    }
+    this._sizeGaps()
+
+    // The recording's length is settled by its last frame from the first
+    // moment, so it never grows here; what changes is how much of the timeline
+    // has been read, which the scrub bar draws as the part it knows about.
+    const { marks, segments } = collectMarkers(this.index)
+    this._emit({
+      frameCount: pstream.count,
+      frameCountKnown: this._frameCountKnown(),
+      marks,
+      segments,
+      hasMainStream: this._present(STREAM_MAIN),
+      hasSubStream: this._present(STREAM_SUB),
+      indexedFrom: this.index.coveredFromMs,
+      indexedTo: this.index.coveredToMs,
+      indexComplete: !!this.index.complete
+    })
+
+    // A window that has just moved may be the first to hold frames of a stream
+    // the opening probe never saw. Both of these are no-ops on the ordinary
+    // extension and cost a short read at most once per stream.
+    this._probeAppearedStreams()
+    this._reconsiderStream()
+  }
+
+  /**
+   * Judges a stream the first time the window holds any of it.
+   *
+   * The opening probe reads the front of the file, which on the common Blue
+   * Iris arrangement -- continuous sub stream, main stream written only while
+   * something moves -- contains no main stream at all. The stream is real, and
+   * the picker should offer it, but nothing can be offered until its codec has
+   * been read off a key frame. The window carries one the moment it reaches an
+   * island, so this costs one short read per stream per file.
+   */
+  _probeAppearedStreams () {
+    if (!this._streaming || !this.probe) return
+    for (const si of [STREAM_MAIN, STREAM_SUB]) {
+      if (this._probingStream[si]) continue
+      const described = this.probe.streams[si]
+      if (described && described.hasKeyFrame) continue
+      const s = this.index.streams[si]
+      if (!s || !s.keys || s.keys.length === 0) continue
+      this._probingStream[si] = true
+      const gen = this._generation
+      probeIndexedStream(this.reader, this.header, this.index, si)
+        .then((next) => {
+          if (gen !== this._generation || !next || !this.probe) return
+          const streams = this.probe.streams.slice()
+          streams[si] = next
+          this.probe = summarizeProbe(streams)
+          this._emitProbe()
+          this._emit({
+            hasMainStream: this._present(STREAM_MAIN),
+            hasSubStream: this._present(STREAM_SUB),
+            autoStreams: autoStreamSources(this.index, this.header, this._playable(), this._probedSizes())
+          })
+          this._reconsiderStream()
+        })
+        .catch(() => {
+          // Left unjudged rather than judged wrongly; the next window that holds
+          // this stream will try again.
+          this._probingStream[si] = false
+        })
+    }
+  }
+
+  /**
+   * Puts the viewer back on the stream they asked for, once it is reachable.
+   *
+   * Only for an explicit request. `auto` is deliberately left alone on a remote
+   * recording: it would otherwise change stream every time the window crossed
+   * into or out of an island of main stream, which is a resolution change, a
+   * decoder rebuild and a stutter, several times a minute, for a choice the
+   * viewer never made. Asking for the main stream by name is asking for exactly
+   * that, and there it is what was wanted.
+   */
+  _reconsiderStream () {
+    if (!this._streaming || this._switching) return
+    if (this.requestedMode === 'auto') return
+    const want = this._effectiveMode(this.requestedMode)
+    if (want === this.streamMode) return
+    // A stream the probe has not described yet cannot be configured for, and
+    // `_probeAppearedStreams` is already reading its key frame; it calls back
+    // here when it has one.
+    const si = want === 'sub' ? STREAM_SUB : STREAM_MAIN
+    if (!this.probe || !this.probe.streams[si]) return
+    this._switching = true
+    const gen = this._generation
+    Promise.resolve()
+      .then(() => this._selectStream(this.requestedMode, false, { quiet: true }))
+      .catch((e) => { if (gen === this._generation) this._onPipelineError(e) })
+      .finally(() => { this._switching = false })
+  }
+
+  /**
+   * Holds playback while the index reads its way to where the playhead is.
+   *
+   * The mechanism is the one a slow decoder already uses -- hold the clock, say
+   * "buffering" -- because to a viewer the two situations are the same: the
+   * picture is not there yet and the time should not run on without it. Asking
+   * the index to follow the playhead on every frame is deliberate and cheap: it
+   * records the position wanted and returns, and the worker inside picks it up.
+   */
+  _awaitCoverage () {
+    if (!this._streaming) return false
+    const ix = this.index
+    const wait = this._coverWait
+    // A seek that could not be resolved yet is what the window is being asked
+    // for; otherwise it is wherever the playhead has got to.
+    const t = wait ? wait.ms : this.clock.currentTime
+    ix.follow(t)
+    if (!ix.holds(t)) {
+      this.clock.setHeld(true)
+      if (!this._state.buffering) this._emit({ buffering: true })
+      return true
+    }
+    if (wait) {
+      this._coverWait = null
+      this._startSeek(wait.ms, wait.preview)
+      // The seek owns the next frame; there is nothing to present from here.
+      return true
+    }
+    return false
+  }
+
   // ----------------------------------------------------------------- internal
 
   async _gotoIndex (idx) {
     if (!this.pstream) return
+    // An index into the table supersedes whatever position was being waited for.
+    this._coverWait = null
     const s = this.pstream
     const target = clamp(idx, 0, s.count - 1)
     this.clock.currentTime = s.ts[target]
@@ -1202,6 +1516,14 @@ export class BvrPlayer {
         return
       }
       if (this._state.buffering) this._emit({ buffering: false })
+    }
+
+    // Asked for on every frame, playing or not: a paused viewer who has just
+    // seeked still wants the window growing under them, and the answer is a
+    // couple of comparisons when there is nothing to do.
+    if (this._awaitCoverage()) {
+      this.video.pump()
+      return
     }
 
     if (!this.scrubbing && this.clock.playing && !this._skipEmptyStretch()) {

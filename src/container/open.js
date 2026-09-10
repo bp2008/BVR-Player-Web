@@ -1,5 +1,6 @@
 import { parseFileHeader } from '../bvr/parseFileHeader.js'
 import { buildIndex } from '../bvr/indexer.js'
+import { openStreamingIndex } from '../bvr/streamingIndex.js'
 import { probeVideoStreams, probeIndexedStream, summarizeProbe } from '../bvr/probe.js'
 import { looksLikeIso } from '../mp4/boxes.js'
 import { openMp4 } from '../mp4/openMp4.js'
@@ -67,10 +68,11 @@ export async function sniffContainer (reader) {
  * undecodable stream is a line to print rather than a reason to stop, and a
  * report is wanted precisely when a file will not play.
  */
-export async function openContainer (reader, { onProbe, onProgress, shouldStop, tolerant = false } = {}) {
+export async function openContainer (reader, opts = {}) {
+  const { onProbe, onProgress, shouldStop } = opts
   const kind = await sniffContainer(reader)
   if (kind === 'mp4') return openMp4Container(reader, { onProbe, onProgress, shouldStop })
-  if (kind === 'bvr') return openBvrContainer(reader, { onProbe, onProgress, shouldStop, tolerant })
+  if (kind === 'bvr') return openBvrContainer(reader, opts)
   throw new UnknownContainerError(
     'This is not a file the player recognises. It reads Blue Iris .bvr recordings ' +
     'and MP4 video (.mp4, .m4v, .mov).'
@@ -83,7 +85,19 @@ async function openMp4Container (reader, { onProbe, onProgress, shouldStop }) {
   return { container: 'mp4', header, index, probe, movie }
 }
 
-async function openBvrContainer (reader, { onProbe, onProgress, shouldStop, tolerant }) {
+/**
+ * `streaming` picks the frame table that suits where the bytes are coming from.
+ *
+ * A local file is read end to end and indexed exactly, because that is cheap and
+ * makes every seek exact. A recording on an HTTP server is not: the scan would
+ * be the whole download, so a window is indexed instead and moved about as the
+ * viewer travels. `startMs` says where playback is about to begin, so opening
+ * into the middle of an hour does not read the first half of it to get there,
+ * and `onIndexChange` is how the window tells the player it has moved.
+ */
+async function openBvrContainer (reader, {
+  onProbe, onProgress, shouldStop, tolerant, streaming = false, startMs = 0, onIndexChange = null
+}) {
   const header = await parseFileHeader(reader)
   header.container = 'bvr'
   // BVR carries no audio configuration beyond its WAVEFORMATEX, so the field the
@@ -95,7 +109,9 @@ async function openBvrContainer (reader, { onProbe, onProgress, shouldStop, tole
   if (shouldStop && shouldStop()) return { container: 'bvr', header, index: null, probe }
   if (!tolerant && probe.decided && !probe.anySupported) throw new Error(probe.summary)
 
-  const index = await buildIndex(reader, header, { onProgress, shouldStop })
+  const index = streaming
+    ? await openStreamingIndex(reader, header, { onChange: onIndexChange, startMs, onProgress })
+    : await buildIndex(reader, header, { onProgress, shouldStop })
   index.container = 'bvr'
   if (shouldStop && shouldStop()) return { container: 'bvr', header, index, probe }
 

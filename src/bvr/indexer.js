@@ -1,10 +1,7 @@
 import { Growable } from './growable.js'
-import { readFrameHeader } from './parseFileHeader.js'
 import { ScanReader } from './scanReader.js'
-import {
-  FLAG_ISAUDIO, FLAG_ISMETADATA, FLAG_ISHEADER, FLAG_ISKEY, FLAG_SUBSTREAM,
-  FLAG_STREAMFLAGS, FLAG_MARK, FRAME_HEADER_SIZE, SIGNATURE
-} from './constants.js'
+import { walkFrames } from './frameWalk.js'
+import { FLAG_ISKEY, FLAG_MARK } from './constants.js'
 
 const SCAN_CHUNK = 16 << 20
 const SCAN_DEPTH = 3
@@ -74,8 +71,15 @@ function finishStream (acc) {
 
 /**
  * Scans the whole file once and builds a complete frame table (spec section 9.5
- * describes this as the alternative to interpolate-and-search; for local files
- * it is both simpler and strictly better because every seek becomes exact).
+ * describes this as the alternative to interpolate-and-search; for a file the
+ * platform hands over at disk speed it is both simpler and strictly better,
+ * because every seek becomes exact).
+ *
+ * A recording reached over the network is the case this is wrong for, and
+ * `src/bvr/streamingIndex.js` is what covers it: there the whole file is what
+ * cannot be afforded, so a stretch at a time is indexed instead. Both walk the
+ * chain through `frameWalk.js`; only what they keep, and how far they go,
+ * differs.
  */
 export async function buildIndex (reader, header, { onProgress, shouldStop } = {}) {
   const fileSize = reader.size
@@ -88,89 +92,47 @@ export async function buildIndex (reader, header, { onProgress, shouldStop } = {
   const metadata = []
   const marks = []
 
+  const sink = {
+    video (si, payloadPos, datasize, timestamp, utc, flags, dio, stateBits) {
+      const acc = streams[si]
+      acc.offset.push(payloadPos)
+      acc.size.push(datasize)
+      acc.ts.push(timestamp)
+      acc.utc.push(utc)
+      acc.flags.push(flags)
+      acc.dio.push(dio)
+      acc.state.push(stateBits)
+      if (flags & FLAG_MARK) marks.push({ stream: si, idx: acc.offset.length - 1, ts: timestamp, utc })
+    },
+    audio (payloadPos, datasize, timestamp) {
+      audio.offset.push(payloadPos)
+      audio.size.push(datasize)
+      audio.ts.push(timestamp)
+    },
+    metadata (payloadPos, datasize, subtype, timestamp, utc) {
+      metadata.push({ offset: payloadPos, size: datasize, subtype, ts: timestamp, utc })
+    }
+  }
+
   const scan = new ScanReader(reader.blob, { chunkSize: SCAN_CHUNK, depth: SCAN_DEPTH })
-  const yieldToUi = makeYield()
-  let pos = header.firstFrameOffset
   let totalFrames = 0
   let resyncs = 0
   let truncated = false
-  let nextProgress = pos + PROGRESS_STEP
 
   try {
-    while (pos + FRAME_HEADER_SIZE <= fileSize) {
-      if (shouldStop && shouldStop()) break
-
-      const need = Math.min(32, fileSize - pos)
-      let at = scan.offsetOf(pos, need)
-      if (at < 0) {
-        await scan.seek(pos)
-        at = scan.offsetOf(pos, need)
-        if (at < 0) break
-      }
-
-      // The frame header is read inline rather than through readFrameHeader():
-      // this loop runs once per frame, and at a few hundred thousand frames an
-      // hour the per-frame record object -- and the BigInt a getBigUint64 would
-      // mint for the UTC field -- are worth not allocating.
-      const view = scan.view
-      if (view.getUint32(at, true) !== SIGNATURE) {
-        const found = await resync(reader, fileSize, pos)
-        if (found < 0) { truncated = true; break }
-        resyncs++
-        pos = found
-        continue
-      }
-      const flags = view.getUint16(at + 4, true)
-      const postbytes = view.getUint16(at + 6, true)
-      const timestamp = view.getUint32(at + 8, true)
-      const datasize = view.getUint32(at + 12, true)
-
-      const payloadPos = pos + FRAME_HEADER_SIZE + postbytes
-      const next = payloadPos + datasize
-      if (next > fileSize) { truncated = true; break }
-
-      let utc = 0
-      let dio = 0
-      let stateBits = 0
-      if (postbytes >= 16 && at + 32 <= view.byteLength) {
-        // Split 64-bit read: unix-ms sits far below 2^53, so this stays exact.
-        utc = view.getUint32(at + 20, true) * 4294967296 + view.getUint32(at + 16, true)
-        dio = view.getUint32(at + 24, true)
-        stateBits = view.getUint32(at + 28, true)
-      }
-
-      if (flags & FLAG_ISHEADER) {
-        // Extra header frames are not expected mid-file; skip per spec section 9.4.
-      } else if (flags & FLAG_ISMETADATA) {
-        metadata.push({ offset: payloadPos, size: datasize, subtype: flags >> 8, ts: timestamp, utc })
-      } else if (flags & FLAG_ISAUDIO) {
-        audio.offset.push(payloadPos)
-        audio.size.push(datasize)
-        audio.ts.push(timestamp)
-      } else {
-        const si = (flags & FLAG_STREAMFLAGS) === FLAG_SUBSTREAM ? 1 : 0
-        const acc = streams[si]
-        acc.offset.push(payloadPos)
-        acc.size.push(datasize)
-        acc.ts.push(timestamp)
-        acc.utc.push(utc)
-        acc.flags.push(flags)
-        // On a video frame the union at offset 28 is `state_bits`, never the
-        // audio power float (spec 2.1), so it is safe to keep as an integer.
-        acc.dio.push(dio)
-        acc.state.push(stateBits)
-        if (flags & FLAG_MARK) marks.push({ stream: si, idx: acc.offset.length - 1, ts: timestamp, utc })
-      }
-
-      totalFrames++
-      pos = next
-
-      if (pos >= nextProgress) {
-        nextProgress = pos + PROGRESS_STEP
-        if (onProgress) onProgress(pos / fileSize)
-        await yieldToUi()
-      }
-    }
+    const walked = await walkFrames(scan, {
+      from: header.firstFrameOffset,
+      fileSize,
+      reader,
+      sink,
+      shouldStop,
+      onProgress: onProgress ? (pos) => onProgress(pos / fileSize) : null,
+      progressStep: PROGRESS_STEP,
+      yieldToUi: makeYield()
+    })
+    totalFrames = walked.frames
+    resyncs = walked.resyncs
+    truncated = walked.truncated
   } finally {
     scan.release()
   }
@@ -195,7 +157,7 @@ export async function buildIndex (reader, header, { onProgress, shouldStop } = {
   const lastSub = sub.count ? sub.ts[sub.count - 1] : -Infinity
   const durationMs = Math.max(0, Math.max(lastMain, lastSub))
 
-  const startUtc = firstUtc(main, sub)
+  const startUtc = firstUtcOf([main, sub])
   const endUtc = lastUtc(main, sub)
 
   if (onProgress) onProgress(1)
@@ -232,11 +194,38 @@ function firstTimestamp (main, sub) {
   return Number.isFinite(v) ? v : 0
 }
 
-function firstUtc (main, sub) {
-  for (const s of [main, sub]) {
-    for (let i = 0; i < s.count; i++) if (s.utc[i] > 0) return s.utc[i]
+/**
+ * The wall-clock moment media time zero corresponds to.
+ *
+ * It has to be the UTC of the *earliest* frame, not of the first stream that
+ * happens to have one. The ordinary Blue Iris arrangement -- sub stream running
+ * the whole hour, main stream written only while something moves -- puts the
+ * main stream's first frame well into the recording, and taking its UTC as the
+ * origin made every wall-clock reading that far fast. On one hour-long sample
+ * here the two differ by thirty-five minutes.
+ *
+ * This is the same frame that settles `baseTs`, so the relative clock and the
+ * absolute one agree by construction. Exported because the streaming index has
+ * to reach the identical answer from a window rather than a whole file, and two
+ * copies of this rule would eventually stop matching.
+ *
+ * Takes any array-likes with `count`, `ts` and `utc`, which is what both index
+ * builders have to offer at the point they need it.
+ */
+export function firstUtcOf (streams) {
+  let bestTs = Infinity
+  let utc = 0
+  for (const s of streams) {
+    // Per stream, the first frame that carries a UTC at all: spec 11.3 allows
+    // the field to be 0 on frames flushed at close, and a leading run of those
+    // says nothing about when the stream started.
+    for (let i = 0; i < s.count; i++) {
+      if (s.utc[i] <= 0) continue
+      if (s.ts[i] < bestTs) { bestTs = s.ts[i]; utc = s.utc[i] }
+      break
+    }
   }
-  return 0
+  return utc
 }
 
 function lastUtc (main, sub) {
@@ -247,33 +236,6 @@ function lastUtc (main, sub) {
     }
   }
   return best
-}
-
-/**
- * Corruption recovery (spec section 10): hunt forward for the next "BLUE" whose
- * frame is complete and is itself followed by a plausible frame.
- */
-async function resync (reader, fileSize, from) {
-  const WINDOW = 1 << 20
-  let at = from + 1
-  while (at + FRAME_HEADER_SIZE <= fileSize) {
-    const len = Math.min(WINDOW, fileSize - at)
-    // Own copy: the nested look-ahead read below would invalidate a shared view.
-    const bytes = await reader.readCopy(at, len)
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    for (let i = 0; i + FRAME_HEADER_SIZE <= len; i++) {
-      if (view.getUint32(i, true) !== SIGNATURE) continue
-      const hdr = readFrameHeader(view, i)
-      const abs = at + i
-      const end = abs + FRAME_HEADER_SIZE + hdr.postbytes + hdr.datasize
-      if (end > fileSize) continue
-      if (end === fileSize) return abs
-      const nextView = await reader.read(end, 4)
-      if (nextView.getUint32(0, true) === SIGNATURE) return abs
-    }
-    at += Math.max(1, len - FRAME_HEADER_SIZE)
-  }
-  return -1
 }
 
 /** Largest index i with s.ts[i] <= t, or 0 when t precedes the stream. */

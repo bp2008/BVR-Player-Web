@@ -113,6 +113,24 @@
             <!-- A file the player refuses is the file somebody most needs
                  described. Reading it again costs a scan, hence the progress. -->
             <div class="overlay__buttons">
+              <!-- A recording on a server is the one kind that fails for
+                   reasons that pass. Blue Iris turns range requests away with
+                   503 when its connection limiter is full, and the recording
+                   that would not play a moment ago plays now -- so the way out
+                   of this box is to try again where trying again might work,
+                   and it resumes where the viewer was rather than at the
+                   start. -->
+              <button
+                v-if="canReload"
+                type="button"
+                class="btn btn--accent"
+                :disabled="reloading"
+                title="Open this recording again from where it stopped"
+                @click.stop="reloadRecording"
+              >
+                <AppIcon name="refresh" :size="16" />
+                <span>{{ reloading ? 'Reloading...' : 'Reload' }}</span>
+              </button>
               <ExportMetadataMenu
                 v-if="lastFile"
                 :busy="analyzing"
@@ -202,6 +220,7 @@
           :duration="state.duration"
           :start-utc="state.startUtc"
           :pstream="playbackStream"
+          :frames-known="state.frameCountKnown"
           :initial-mode="settings.timeDisplay"
           @seek="onSeekDialog"
           @close="seekOpen = false"
@@ -339,6 +358,8 @@ import { analyzeRecording } from './container/analyze.js'
 import { downloadBlob } from './util/download.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { readSessionUrl, sessionHash, writeSessionHash } from './util/sessionUrl.js'
+import { HttpFile } from './remote/httpFile.js'
+import { splitRemoteUrl, rememberCredentials, requestUrl, remoteName } from './remote/blueIris.js'
 import { formatBytes } from './util/format.js'
 import { acceptsTypedText, isSpaceKey } from './util/keys.js'
 import { PANELS, panelDef } from './panels/panels.js'
@@ -436,8 +457,15 @@ export default {
       // Where the current file was opened from, so Back knows what "back" is:
       // the folder browser it was picked out of, or the start screen.
       fileOrigin: '',
+      // The recording currently open on a server, as the address bar should
+      // describe it: the URL with its session token already taken off. Null for
+      // a local file, which is described by `fileRef` instead.
+      remoteRef: null,
       analyzing: false,
       analyzeProgress: 0,
+      // Whether a reload of the open remote recording is under way, so the
+      // button cannot be pressed twice into two overlapping opens.
+      reloading: false,
       // The sequence the player is showing, kept apart from `fileContext`
       // because the two change at different moments: the context describes the
       // recording and lasts as long as it is open, while this is rebuilt every
@@ -473,6 +501,18 @@ export default {
     },
     backToLibrary () {
       return this.fileOrigin === 'library' && this.canBrowse
+    },
+    /**
+     * Whether the recording that just failed can simply be asked for again.
+     *
+     * Only a remote one: the link is the whole of what it takes to reopen it,
+     * where a local file needs the handle and the permission that a fresh file
+     * picker would have to negotiate. And only for a failure that left the app
+     * knowing which recording it was about -- a refusal at the very first
+     * request never gets that far, and is reported as a notice instead.
+     */
+    canReload () {
+      return this.state.status === 'error' && !!this.remoteRef
     },
     hasFile () {
       return this.state.status === 'ready' || this.state.status === 'loading' || this.state.status === 'error'
@@ -704,6 +744,7 @@ export default {
     window.addEventListener('keydown', this.onSpaceKey, true)
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('beforeunload', this.closeAllPopouts)
+    window.addEventListener('hashchange', this.onHashChange)
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
     window.addEventListener('beforeinstallprompt', this.onInstallPrompt)
     // The dock stacks exist from here on, so a Teleport may safely look for one.
@@ -716,6 +757,7 @@ export default {
     window.removeEventListener('keydown', this.onSpaceKey, true)
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('beforeunload', this.closeAllPopouts)
+    window.removeEventListener('hashchange', this.onHashChange)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
     window.removeEventListener('beforeinstallprompt', this.onInstallPrompt)
     if (this.ro) this.ro.disconnect()
@@ -757,6 +799,8 @@ export default {
       this.lastFile = file
       this.fileOrigin = origin
       this.fileRef = ref
+      // A local file supersedes whatever remote recording the URL described.
+      this.remoteRef = null
       this.resumeState = resume
       // Opening a file by hand supersedes whatever the URL was still hoping to
       // reopen. A resume opening its own file does not: it stays the page's
@@ -769,6 +813,53 @@ export default {
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
     },
     /**
+     * Opens a recording that lives on a server rather than on this machine.
+     *
+     * This is the arrival path for a hand-off from UI3, which links here with
+     * the clip's URL. Two things separate it from opening a local file. The
+     * session token that came with the link is set aside before anything is
+     * remembered, so it never reaches the address bar this app keeps rewriting
+     * -- see `src/remote/blueIris.js`. And the position is passed into the
+     * player rather than seeked to afterwards: a remote recording is indexed
+     * from wherever playback is about to start, and being told after the fact
+     * would mean reading the first half of an hour to reach the middle of it.
+     */
+    async openRemote (url, name = '', resume = null) {
+      const split = splitRemoteUrl(url)
+      if (!split) {
+        this.showNotice(`${url} is not an address this player can open.`)
+        return
+      }
+      rememberCredentials(split.url, split.credentials)
+
+      this.notice = ''
+      this.uiVisible = true
+      this.fileContext = null
+      this.playbackStream = null
+      this.fileOrigin = 'remote'
+      this.fileRef = null
+      this.remoteRef = { url: split.url, name: remoteName(split.url, name) }
+      this.resumeState = resume
+      this.resumeTarget = null
+
+      try {
+        const file = await HttpFile.open(requestUrl(split.url), { name: this.remoteRef.name })
+        this.lastFile = file
+        this.syncUrl()
+        await this.player.open(file, { startMs: resume ? resume.time : 0 })
+        this.player.setVolume(this.settings.volume)
+        if (this.settings.muted !== this.player.muted) this.player.toggleMute()
+      } catch (e) {
+        // A wrong address, an expired session, a server that will not serve
+        // ranges: all of them arrive here, and all of them mean the same thing
+        // to somebody looking at a start screen.
+        const label = this.remoteRef ? this.remoteRef.name : 'That recording'
+        this.remoteRef = null
+        this.resumeState = null
+        this.showNotice(`${label} could not be opened: ${(e && e.message) || e}`)
+      }
+    },
+    /**
      * Leaves the recording for wherever it was opened from.
      *
      * Two places, and the app already knew both: a clip picked out of the folder
@@ -778,11 +869,41 @@ export default {
      * "Choose another file" was the only way out of a refusal and it threw away
      * the folder the viewer was working through.
      */
+    /**
+     * Opens the failed remote recording again, where the viewer left off.
+     *
+     * Reopening rather than reloading the page: the panel layout, the folder
+     * behind the app and the session token are all already in hand, and a page
+     * reload would negotiate the lot again to arrive at the same place. The
+     * position is taken from the state the player was in when it stopped, which
+     * survives a decode failure -- `_onPipelineError` reports and pauses rather
+     * than closing the file.
+     */
+    async reloadRecording () {
+      if (!this.remoteRef || this.reloading) return
+      const ref = this.remoteRef
+      const at = Math.max(0, this.state.currentTime || 0)
+      this.reloading = true
+      try {
+        // No panels to put back: they are open already, and this is one
+        // recording being opened again rather than a session being restored.
+        await this.openRemote(ref.url, ref.name, {
+          time: at, playing: false, panels: [], collapsed: []
+        })
+        // A reload refused before the player was handed anything clears the
+        // reference on its way out, and with it the button that would let the
+        // viewer try once more. The server was busy, not gone; put it back.
+        if (!this.remoteRef && this.state.status === 'error') this.remoteRef = ref
+      } finally {
+        this.reloading = false
+      }
+    },
     goBack () {
       const toLibrary = this.backToLibrary
       this.player.close()
       this.lastFile = null
       this.fileRef = null
+      this.remoteRef = null
       this.fileOrigin = ''
       this.notice = ''
       if (toLibrary) this.openLibrary()
@@ -1371,6 +1492,7 @@ export default {
       const waiting = this.resumeTarget
       const { hash, stable } = sessionHash({
         file: waiting ? waiting.file : this.fileRef,
+        remote: waiting ? waiting.remote : this.remoteRef,
         time: waiting ? waiting.time : this.state.currentTime,
         playing: waiting ? waiting.playing : this.state.playing,
         panels: this.urlPanels()
@@ -1430,6 +1552,20 @@ export default {
     restoreFromUrl () {
       const saved = readSessionUrl()
       const deferred = this.applyUrlPanels(saved.panels)
+      // A recording on a server needs no permission and no handle: the link is
+      // the whole of what it takes to reopen it, so unlike a local file it is
+      // simply opened rather than offered as a Resume button.
+      if (saved.remote) {
+        this.urlReady = true
+        this.syncUrl()
+        this.openRemote(saved.remote.url, saved.remote.name, {
+          time: saved.time,
+          playing: saved.playing,
+          panels: deferred,
+          collapsed: saved.panels.collapsed
+        })
+        return
+      }
       if (saved.file) {
         this.resumeTarget = {
           file: saved.file,
@@ -1444,6 +1580,87 @@ export default {
       this.urlReady = true
       this.syncUrl()
       if (this.resumeTarget) this.resumeFromUrl()
+    },
+    /**
+     * The fragment changed without this app having changed it.
+     *
+     * Editing the address bar and pressing enter is a *same-document*
+     * navigation: the browser fires `hashchange` and does not reload, so
+     * `restoreFromUrl` -- which only ever runs at startup -- never sees it and
+     * the page appears to ignore what was typed. Pasting a hand-off fragment
+     * from UI3 onto a player that is already open is exactly that gesture, so it
+     * has to work.
+     *
+     * The app writes the fragment itself several times a second while a
+     * recording plays. Almost all of those go through `replaceState`, which
+     * fires nothing, but the `file://` fallback in `writeSessionHash` sets
+     * `location.hash` directly and does fire -- so what was last written is
+     * compared against, and only a fragment this app did not author is acted on.
+     */
+    onHashChange () {
+      if (!this.urlReady) return
+      const current = (location.hash || '').replace(/^#/, '')
+      if (current === this.urlHash) return
+      this.applyExternalUrl(readSessionUrl())
+    },
+    /**
+     * Acts on a fragment somebody else wrote.
+     *
+     * Deliberately not a reload. The panels, the folder permission and any
+     * recording already open are all worth keeping when the only thing that
+     * changed is the playhead -- and on a remote recording, keeping the open
+     * file also keeps its byte cache, so moving about inside a clip someone
+     * linked into costs nothing extra.
+     */
+    applyExternalUrl (saved) {
+      // Panels first: they apply whatever else the fragment turns out to name,
+      // and a recording arriving later picks up the ones that had to wait.
+      const deferred = this.applyUrlPanels(saved.panels)
+
+      if (saved.remote) {
+        if (this.remoteRef && this.remoteRef.url === saved.remote.url) {
+          return this.followUrlPosition(saved)
+        }
+        this.openRemote(saved.remote.url, saved.remote.name, {
+          time: saved.time,
+          playing: saved.playing,
+          panels: deferred,
+          collapsed: saved.panels.collapsed
+        })
+        return
+      }
+
+      if (saved.file) {
+        const open = this.fileRef
+        if (open && open.name === saved.file.name && open.dir === saved.file.dir) {
+          return this.followUrlPosition(saved)
+        }
+        // A local recording cannot simply be opened from a name: it needs the
+        // folder handle and the permission that goes with it, which is the
+        // whole of what `resumeFromUrl` exists to negotiate.
+        this.resumeTarget = {
+          file: saved.file,
+          time: saved.time,
+          playing: saved.playing,
+          deferred,
+          collapsed: saved.panels.collapsed
+        }
+        this.resumeFromUrl()
+        return
+      }
+
+      // A fragment naming no recording -- someone clearing it, or a bare panel
+      // layout. Closing what is open would be a destructive reading of an
+      // ambiguous gesture, so the panels are all that is applied.
+      this.syncUrl()
+    },
+    /** Moves the playhead of the recording already open to what the URL says. */
+    followUrlPosition (saved) {
+      if (saved.time > 0 && this.state.status === 'ready') {
+        this.onSeek(Math.min(saved.time, this.state.duration), false)
+      }
+      if (saved.playing && !this.state.playing) this.player.play()
+      this.syncUrl()
     },
     /**
      * Puts the docks back, and says which panels could not be opened yet.

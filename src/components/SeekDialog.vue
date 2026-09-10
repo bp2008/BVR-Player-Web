@@ -100,7 +100,16 @@ export default {
      */
     pstream: { type: Object, default: null },
     /** Which reading to open on; the control bar's own time display. */
-    initialMode: { type: String, default: 'elapsed' }
+    initialMode: { type: String, default: 'elapsed' },
+    /**
+     * Whether `pstream` counts the whole recording.
+     *
+     * A streamed file is indexed a window at a time, so its frame numbers are
+     * counted from wherever the window happens to start and mean nothing as an
+     * address. Typing one would land somewhere unrelated, so the reading is not
+     * offered at all rather than offered and wrong.
+     */
+    framesKnown: { type: Boolean, default: true }
   },
   emits: ['seek', 'close'],
   data () {
@@ -115,7 +124,7 @@ export default {
   },
   computed: {
     canClock () { return this.startUtc > 0 },
-    canFrame () { return this.frameCount > 0 },
+    canFrame () { return this.framesKnown && this.frameCount > 0 },
     frameCount () { return this.pstream ? this.pstream.count : 0 },
     /** The readings this recording can actually be addressed in. */
     modes () {

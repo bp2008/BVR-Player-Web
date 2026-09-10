@@ -76,6 +76,22 @@ export function planAuto (index, header, playable = [true, true], sizes = null) 
   return { ranked, runs, used: used.length ? used : ranked.slice(0, 1) }
 }
 
+/**
+ * The single best stream to play, when playing two of them is not on offer.
+ *
+ * A streaming index covers a window rather than the recording, and `auto` is a
+ * judgement about the whole of it: which stream has pictures when, and where the
+ * changeovers should fall. Recomputing that over a window that keeps growing
+ * would move run boundaries the decoder has already crossed. So a remote
+ * recording picks one stream, and this is the same preference `auto` would have
+ * applied -- the bigger picture, ties to the main stream.
+ */
+export function preferredStream (index, header, playable = [true, true], sizes = null) {
+  const ranked = rankStreams(index, header, sizes, usableStreams(index, playable))
+  if (ranked.length) return ranked[0]
+  return index.streams[STREAM_MAIN].count > 0 ? STREAM_MAIN : STREAM_SUB
+}
+
 /** Which streams `auto` will draw on, for the stream menu's labels. */
 export function autoStreamSources (index, header, playable, sizes) {
   return planAuto(index, header, playable, sizes).used

@@ -25,11 +25,14 @@ recordings — the main/sub stream selection and whether the two are shown in th
 same shape, all live in the settings panel and persist in the web browser's
 `localStorage`.
 
-The panel also reports how much of the browser's own storage this page is using
-and offers two ways to give it back: **Delete thumbnails**, which costs only the
-work of making them again as folders are re-browsed, and **Clear all site data
-and close**, which erases settings, cached listings, thumbnails and the folder
-permission grant and then shuts the page. Both ask first, in the panel rather
+The panel also reports how much of the browser's own storage this page is using,
+and — once there is any — how much of that is the byte cache behind recordings
+played over the network, alongside the size at which its oldest recordings start
+being dropped. It offers two ways to give the storage back: **Delete
+thumbnails**, which costs only the work of making them again as folders are
+re-browsed, and **Clear all site data and close**, which erases settings, cached
+listings, thumbnails, the cached video and the folder permission grant and then
+shuts the page. Both ask first, in the panel rather
 than through a dialog.
 
 Closing is part of the second one rather than decoration: what is left on screen
@@ -1491,16 +1494,393 @@ nothing but the incoming decoder's allowance left to widen. The feed would
 recover by inflating the wrong decoder, at every changeover, which is the bug
 this section is about wearing a different hat.
 
-### Very large files — not done, on purpose
+### The clock origin was the wrong frame
 
-The design still scans the whole file once on open. Making the index sparse and
-seeking by the spec's interpolate-and-search (§9.5) would help a multi-gigabyte
-clip on a network share, but it trades away the property the current design is
-built on: every seek is exact and needs no searching. `src/bvr/tail.js` already
-implements the backwards last-frame scan (§9.3) that such a mode would need, so
-the groundwork is there — but the switch itself is a change to how seeking works,
-not an addition, and should be a deliberate decision rather than a side effect of
-building something else.
+`index.startUtc` is what media time zero means in wall-clock terms, and
+`firstUtc` used to return the first stream that had a UTC at all — which meant
+the *main* stream whenever it had any frames. On the arrangement most Blue Iris
+users run, sub stream continuous and main stream written only on motion, the
+main stream's first frame is a long way into the recording: thirty-five minutes,
+on the `garagewide` sample here.
+
+Nothing about decoding or seeking by media time used it, so the bug hid. What it
+moved was every wall-clock reading derived from the origin — the end-of-clip
+label in the control bar, "Starts" in the metadata panel, the base the metadata
+report stamps records against — and, functionally, the seek dialog's clock mode,
+which converts a typed time by `utc - startUtc` and so landed thirty-five minutes
+out. The *current* time readout was always right, because it uses the playing
+frame's own `utc` rather than the origin.
+
+It is now the UTC of the earliest frame across both streams, which is the same
+frame that settles `baseTs`, so the relative and absolute clocks agree by
+construction. `firstUtcOf` is exported from `indexer.js` and used by the
+streaming index too, because two copies of this rule would eventually stop
+matching — and `sample/_check/streaming.html` now checks both builders against an
+oracle it computes itself.
+
+### Very large files — the local answer is still the whole scan
+
+For a file the platform hands over at disk speed, the full scan remains right,
+and nothing about it has changed: one pass, and every seek afterwards is exact.
+A recording reached over HTTP is the case it is wrong for, and that has its own
+index now — see [Playing a recording over HTTP](#playing-a-recording-over-http).
+The two share the frame walk and differ only in what they keep and how far they
+go.
+
+## Playing a recording over HTTP
+
+The player can open a `.bvr` straight off Blue Iris's embedded web server using
+range requests, rather than only files that are already on the machine.
+
+### Why the full index could not simply be reused
+
+A BVR file is a chain whose links are its payloads. The only way to learn where
+frame N+1 begins is to read frame N's header, and that header sits on the far
+side of frame N's data — so indexing a stretch costs exactly the bytes of that
+stretch, and indexing all of it costs the whole file. There is no header-only
+shortcut: fetching just the headers would be one request per frame, hundreds of
+thousands of them.
+
+That is affordable on a disk and not affordable on a network. An hour of
+continuous recording is a gigabyte or more; on a 10 Mbit uplink the scan alone is
+a quarter of an hour, and it spends a viewer's whole data allowance to show them
+thirty seconds. So the remote path indexes a **window** instead
+(`src/bvr/streamingIndex.js`): one contiguous run of frames covering where the
+playhead is, grown forward as playback advances, thrown away and rebuilt
+somewhere else when the viewer seeks somewhere far off. This is the spec's own
+interpolate-and-search (§9.5) with the results kept.
+
+Two properties of the format are what make it work at all. The chain is
+**self-synchronising**, so a validated `BLUE` signature is enough to start
+reading from a byte offset nobody has visited — the same hunt that recovers from
+corruption is what makes random access possible, and it is the same code
+(`findFrameFrom` beside `resync` in `src/bvr/frameWalk.js`). And **time and bytes
+are roughly proportional**, so a position can be estimated and then corrected.
+
+### What it costs to open
+
+The recording's length comes from its last frame (§9.3, `src/bvr/tail.js`, which
+the folder browser already used), so the scrub bar describes the whole clip from
+the first moment even though almost none of it has been read. Measured against
+the samples here, on a 918 MB hour-long recording:
+
+| | |
+|---|---|
+| Open (duration, codecs, first pictures) | 82 ms, 2.3 MB — 0.3% of the file |
+| Seek to 48 minutes in | ~1 s, 10.3 MB |
+| Open + play + far seek + seek back | 18.8 MB, **2.0% of the file** |
+
+### Finding a time without an index
+
+`_locate` is an interpolation search bracketed by two known points, and each
+probe reads one frame header and leaves a permanent anchor behind — so the
+second seek into a recording is cheaper than the first and the tenth is nearly
+free.
+
+It is an **Illinois** false position rather than the straight kind, and the
+reason is worth recording because the straightforward version was written first
+and was badly wrong. The common Blue Iris arrangement — a sub stream running
+continuously beside a main stream written only while something moves — produces a
+file whose bytes-per-second vary by an order of magnitude along its length. On
+`garagewide` here, interpolating between the two ends puts the half-way mark six
+minutes from where it really is; plain false position then converges from one
+side and leaves the other end of the bracket where it started, so the search
+burns its whole budget having learned almost nothing. The first version read
+765 MB for a single seek. Halving the retained end's weight after a repeat
+restores the guarantee that both ends close on the answer, and the same seek now
+reads about 8 MB.
+
+Reading begins a little before the target, because decoding can only start at a
+key frame and the chain cannot be walked backwards. How far before is measured
+from the recording's own key-frame spacing rather than fixed: on a main stream at
+ten megabits every second of back-off is another megabyte over the wire.
+
+### Budgets, in time and in bytes
+
+Every read bound is expressed twice and the tighter wins. "Six seconds of video"
+is a quarter of a megabyte of sub stream and seventeen megabytes of 4K main
+stream, and a viewer opening a clip should wait about the same either way — so
+time keeps a low-bitrate recording from stopping absurdly short, and bytes keep a
+high-bitrate one from spending an allowance before the first picture. Every
+forward walk is bounded too: an early version let one bad estimate become a march
+to the end of the recording, which is the exact cost this design exists to avoid.
+
+### The byte source
+
+`src/remote/httpFile.js` presents the small part of `Blob` the app actually uses
+— `size`, `name`, `slice(a, b).arrayBuffer()` — so `BlobReader`, `ScanReader`,
+the metadata pipeline, the exporter and the thumbnailer all work unchanged and
+nothing above it learns that the bytes came off a network. It is checked by
+indexing the same recording both ways and comparing the frame tables field by
+field: `sample/_check/indexfp.html` fails if a remote read differs from a local
+one anywhere.
+
+Reads are coalesced into few large requests and issued six at a time, because
+Blue Iris closes every connection and on a link with real latency the depth is
+what hides it. Speculative read-ahead starts only after three consecutive
+contiguous reads: a seek search reads a window here and a window there, and
+treating two of those landing near each other as a pattern used to cost a couple
+of megabytes per probe — most of what a seek spent.
+
+Blue Iris's server departs from RFC 9110 in ways that all shape this file. `HEAD`
+answers 503, so size is probed with a one-byte `GET`. A range whose end runs past
+EOF is refused with 416 rather than clamped, so both ends are always computed and
+clamped here. A malformed range drops the connection with no reply at all, so a
+range is never built from a caller's string. Multi-range replies are a raw
+concatenation rather than `multipart/byteranges`, so ranges are requested one at
+a time.
+
+### Caching
+
+Two tiers. An in-memory LRU of 256 KB blocks holds the working set; 1 MB pages in
+the origin private file system make the second visit free and survive a reload,
+which matters because the address bar remembers a remote clip and its playhead
+exactly as it remembers a local one. A page is written only once every block of
+it is in hand, which keeps a file's presence and its completeness the same fact
+and spares the store an occupancy map. Whole recordings are evicted rather than
+individual pages: a half-cached clip still costs a request at every gap, and the
+unit a viewer thinks in is the clip.
+
+The cache is allowed half the origin's quota, never less than 256 MB and never
+more than 8 GB: half of a large disk is more than anyone means to hand a player
+for scratch space, and what gets read twice is the clip in hand and the few
+before it, not eight gigabytes of them. Past that ceiling, recordings go
+least-recently-used first, ranked by the `used` stamp each one's `meta.json`
+carries — written when the recording is opened, again every five seconds while
+pages are being written, and once more at close.
+
+Two things decide when that trimming happens. It cannot be only at open: a
+session sitting on one long recording writes gigabytes without opening anything
+again. But measuring properly means a metadata read per cached recording, which
+is far too much to do per page — so the last measured total plus the bytes
+written since it stands as an upper bound on what is stored now, and costs
+nothing to keep. A cache with room to spare therefore never touches the disk,
+and one at the ceiling is trimmed to 64 MB under it, which puts the walk at one
+per 64 MB written rather than one per page. The recording being played is never
+the one evicted — its pages would be fetched again before the file was even
+closed — and when everything left is open, the next walk waits for another 64 MB
+rather than repeating itself for nothing. What an open recording has written is
+folded into the measurement from the store itself, since its metadata is by
+design up to five seconds behind.
+
+Nothing here expires on age: pages live until the ceiling forces the question,
+the recording's size or modification time changes and makes a new key, the
+browser evicts the origin, or the settings panel's **Clear all site data**
+erases it.
+
+OPFS needs no fallback here. Both it and WebCodecs are secure-context APIs, so
+any page that can decode video can also store bytes — see the deployment note
+below.
+
+### Arriving from UI3
+
+UI3 links here with the clip's URL, which carries a Blue Iris session token
+because that is how the server authenticates. A token is a credential, and this
+player rewrites the address bar continuously, so `src/remote/blueIris.js` splits
+the two apart on arrival: the clip is identified by origin and path, which is
+what gets remembered and shown, and the token goes into `sessionStorage`, which
+is per-tab and dies with it. A reload therefore resumes — same tab, same storage
+— while a bookmark or a pasted link carries no more authority than the person
+opening it already had. The token is also kept out of the cache key, which is
+what stops every login from being a cache miss.
+
+The fragment gains `u=`; everything else about the session URL is unchanged, and
+a local recording round-trips exactly as before. The full contract:
+
+| Key | |
+|---|---|
+| `u` | the clip's URL, session argument included. Required. Relative is resolved against the page, so a player served by Blue Iris itself can be linked with `u=/clips/@123.bvr`. |
+| `f` | display name. Optional — Blue Iris addresses clips by database id, which is not what anyone calls them. |
+| `t` | position in seconds, decimals allowed. Optional. |
+| `play=1` | start playing. Optional. |
+
+`GetBvrPlayerFragment()` at the bottom of UI3's `ui3.js` builds exactly this for
+whatever clip is open, reusing UI3's own `GetDownloadClipInfo` so the URL is the
+same one its download link uses. `copy(GetBvrPlayerFragment())` in the console
+puts it on the clipboard.
+
+### The fragment has to be watched, not just read once
+
+Editing the address bar and pressing enter is a **same-document navigation**: the
+browser fires `hashchange` and does not reload. `restoreFromUrl` only ever runs at
+startup, so before this the page simply ignored a fragment typed or pasted into
+it — which is the first thing anyone does with a hand-off link on a player that
+is already open.
+
+`onHashChange` closes that. The app writes the fragment itself every couple of
+seconds while a recording plays, so the handler compares against the last thing
+it wrote and acts only on a fragment it did not author. Almost all of the app's
+own writes go through `replaceState` and fire nothing at all; the `file://`
+fallback in `writeSessionHash` sets `location.hash` directly and does fire, which
+is exactly what that comparison is for.
+
+Acting on one is deliberately not a reload. `applyExternalUrl` keeps whatever is
+already open when only the position changed — which on a remote recording keeps
+its byte cache too, so moving about inside a clip somebody linked into costs
+nothing extra. A different `u=` opens that recording; a local recording named by
+`f=`/`d=` goes through `resumeFromUrl`, because a name alone cannot open a file
+without the folder handle and the permission that goes with it. A fragment naming
+no recording at all applies its panels and leaves the recording alone, on the
+grounds that closing it would be a destructive reading of an ambiguous gesture.
+
+### Deployment: the player must be on a secure origin
+
+This is not a constraint the feature introduces, but it decides where the feature
+can be used, so it is worth stating plainly. `VideoDecoder` is undefined outside
+a secure context, so the player cannot run at all from `http://<lan-ip>:81` —
+verified on this machine, where that origin reports `isSecureContext: false` and
+has neither WebCodecs nor OPFS nor the File System Access API. Remote playback
+therefore needs Blue Iris reachable over **https**, or the player opened on the
+Blue Iris machine itself through `localhost`.
+
+Cross-origin does work, which was not obvious: `Range` has been a CORS-safelisted
+request header since 2022 for simple `bytes=a-b` values, so it triggers no
+preflight — which matters because Blue Iris's `OPTIONS` returns no
+`Access-Control-Allow-Headers` and a preflight would fail. `Content-Range` is
+*not* safelisted and Blue Iris sends no `Access-Control-Expose-Headers`, so a
+cross-origin size probe cannot read it; the fallback is a plain `GET` read only
+as far as its headers, whose `Content-Length` is safelisted, then aborted. The
+GitHub Pages build is https, so it can only reach an https Blue Iris — a plain
+http server is blocked as mixed content whatever the CORS headers say.
+
+### Reaching the end is not the same as being finished
+
+The window tracks two facts that are easy to confuse and were, for a while, the
+same flag. `atEof` says the walk has reached the end of the file and there is
+nothing further to read *forward*. `complete` says the window began at the first
+frame as well, so it describes the whole recording. Only the second means stop
+indexing.
+
+Conflating them is a good bug to know about, because the symptom looks nothing
+like the cause: seek near the end of a clip, and from then on the player would
+not play anything earlier than wherever that window had happened to start. The
+buffering chip came up and stayed up, and seeking forward past that arbitrary
+moment cleared it. What had happened is that reaching the end set `complete`,
+`complete` short-circuited `holds()` and made `ensure()` return immediately, and
+so the one thing that could have fixed it — re-anchoring backwards — was the
+one thing that could no longer happen.
+
+A seek that has to wait for bytes is now remembered rather than awaited, too.
+`index.ensure()` settles when the window stops moving, which is not the same as
+its having arrived: a re-anchor that lands short, or a read the server refused,
+both settle it early. The position is held in `_coverWait` and `_awaitCoverage`
+retests it once a frame until the window really does hold it. `ensure` is still
+called, but only for what it throws.
+
+### Which streams a remote recording has
+
+The window's tables describe a stretch of the file, and asking them which
+streams the *recording* holds gives the wrong answer on exactly the arrangement
+that matters most: continuous sub stream, main stream written only while
+something moved. Open such a clip and the opening window — a couple of megabytes
+from the front — contains no main stream at all, so the picker offered one
+stream and the other was unreachable however far the viewer travelled.
+
+Three things fix it, and none of them costs a read the player was not already
+making:
+
+- `StreamingIndex` keeps `everSeen` across re-anchors, because what the file
+  contains does not stop being true when the window moves off it.
+- Spec 5.3's MAINAVAILABLE flag rides on the sub-stream frames, so a walk
+  through sub-only bytes still reports that the main stream is there. That is
+  `knownStreams()`, and it is what the picker is built from.
+- The first window that does hold main-stream frames triggers
+  `probeIndexedStream` for that stream — one short read at its first key frame
+  — so the codec verdict the opening probe could not reach arrives when the
+  frames do.
+
+A named stream request is then sticky. `requestedMode` is what the viewer asked
+for and `streamMode` is what is playing; where a window has no main stream the
+two come apart, and `_reconsiderStream` puts them back together as soon as the
+window reaches an island. Only for a named request — `auto` is deliberately left
+alone, since switching stream every time the window crossed an island edge is a
+resolution change, a decoder rebuild and a stutter, several times a minute, for
+a choice the viewer never made.
+
+### Frame numbers are not offered where they would be wrong
+
+A streaming index counts the frames it has read. That number grows with every
+extension and starts again at every re-anchor, so quoting it as the recording's
+frame count said something that was never true of the file and was different a
+second later. `frameCountKnown` is false while the index covers a window, and
+the readouts that count in frames say nothing rather than something wrong: the
+control bar drops "frame N of M", the metadata panel qualifies its count as "in
+the part read", and the seek dialog does not offer to seek by frame number at
+all. All three are restored the moment the window covers the whole recording.
+
+### 503 is back-pressure, not a failure
+
+Blue Iris limits how many connections it will serve at once, and a burst of range
+requests — which is exactly what a seek is — can cross that limit and be turned
+away wholesale with 503. Nothing is wrong with the recording or the range; the
+server is full. So `httpFile.js` treats an overload answer as something to obey
+rather than report: the request is retried on a longer, jittered backoff, the
+file stops issuing requests briefly, and its connection depth is pulled to one
+and let back out a connection at a time as clean answers accumulate. `probeSize`
+retries the same way, so a clip does not fail to open merely because something
+else was being served at that moment.
+
+Where a recording does end up refused, the error box offers **Reload** for a
+remote one, which reopens the clip where the viewer was rather than at the
+start. The URLs quoted in those messages are stripped to origin and path, since
+a Blue Iris clip address carries a session token and an error message is the one
+place in the app a URL is shown verbatim.
+
+### What the window gives up
+
+- **`auto` stream switching is not offered on a remote recording.** Choosing
+  between two streams is a judgement about stretches of time (`coverage.js`), and
+  a plan recomputed over a growing window would revise decisions the decoder has
+  already acted on — run boundaries would move under the playhead. Streaming
+  picks the stream `auto` would have settled on and stays there, and a named
+  stream is what a viewer who wants the other one asks for. This is the first
+  thing to revisit if remote playback gets more use.
+- **Marks and segment ticks appear as the viewer travels**, since they are only
+  known where the file has been read.
+- **The scrub bar's main/sub banding, and the main-stream jump buttons with it,
+  are not drawn on a remote recording.** Both are read from `coverage.js`, which
+  describes stretches of time the index has actually seen; over a window that is
+  a claim about a few seconds dressed up as a claim about an hour. Saying nothing
+  is right, but it does mean the jump buttons sit dead on exactly the recordings
+  they were built for — the second thing to revisit.
+- **The metadata report still wants the whole recording**, because that is what
+  it is a report of.
+
+The invariant everything above the index leans on is that **while the window only
+grows, a frame's index never changes**. Growth is therefore something the
+pipelines absorb — `VideoPipeline.adopt`, `AudioPipeline.refresh`,
+`MetadataPipeline.refresh` — and only a re-anchor makes them drop what they hold.
+
+### Checking it
+
+One of these does run in Node, because what it exercises does not need a
+browser:
+
+    node sample/_check/testStreaming.mjs
+
+It builds a recording of the awkward shape — a sub stream end to end at a real
+bitrate, two short islands of main stream — and holds the window to its own
+bookkeeping: what it claims to cover, when it may stop reading, that reaching the
+end of the file does not make an earlier moment unreachable, and that a stream
+the window is not sitting on is still known to be in the file.
+
+The rest are browser pages, because most of what they exercise — OPFS,
+WebCodecs, range requests against a real origin — does not exist in Node. Serve
+the repository over http (any static server with range support) and open:
+
+| Page | What it holds to |
+|---|---|
+| `sample/_check/remote.html` | the byte source, against a full download, same-origin and cross-origin |
+| `sample/_check/indexfp.html` | a remote index must be identical to a local one, field for field |
+| `sample/_check/streaming.html` | every frame the window reports must match a full scan of the same file |
+| `sample/_check/player.html` | the real player, opening and seeking a remote recording |
+| `sample/_check/handoff.html` | the URL contract, and that no token escapes the tab |
+| `sample/_check/syntax.html` | every module parses and its cross-imports resolve, without a build |
+
+`player.html` swaps `requestAnimationFrame` for a timer, because a document that
+is not being composited is never handed one and the player's loop would simply
+not run. That is worth knowing before debugging a player that appears to have
+stalled in an automated browser.
 
 ### Matched stream shapes, corrected once
 

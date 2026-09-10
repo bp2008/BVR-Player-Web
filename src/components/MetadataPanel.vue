@@ -43,7 +43,7 @@
             <dd>{{ shownAs }}</dd>
           </div>
           <div><dt>Nominal rate</dt><dd>{{ state.fps ? state.fps.toFixed(2) + ' fps' : '--' }}</dd></div>
-          <div><dt>Frames</dt><dd>{{ state.frameCount.toLocaleString() }}</dd></div>
+          <div><dt>Frames</dt><dd>{{ frameCountText }}</dd></div>
           <div><dt>Source</dt><dd>{{ state.streamLabel }}</dd></div>
         </dl>
 
@@ -122,7 +122,7 @@
 
       <!-- ----------------------------------------------------------- frame -->
       <section v-else-if="tab === 'frame'" class="metasec">
-        <h3 class="metasec__h">Frame {{ (state.frameIndex + 1).toLocaleString() }}</h3>
+        <h3 class="metasec__h">{{ frameHeading }}</h3>
         <dl class="kv">
           <div><dt>Media time</dt><dd>{{ formatTime(frame.ts) }}</dd></div>
           <div><dt>UTC</dt><dd>{{ frame.utc ? formatUtc(frame.utc) : 'absent' }}</dd></div>
@@ -299,6 +299,26 @@ export default {
   },
   computed: {
     header () { return this.context ? this.context.header : null },
+    /**
+     * How many frames the recording holds -- where that is a question this app
+     * can answer.
+     *
+     * A recording read over the network is indexed a window at a time, so the
+     * only frame count in hand is the window's, and it changes with every
+     * extension and starts again at every seek. Reporting it as the file's would
+     * be a number that is never twice the same and never right.
+     */
+    frameCountText () {
+      if (!this.state.frameCountKnown) {
+        return this.state.frameCount.toLocaleString() + ' in the part read'
+      }
+      return this.state.frameCount.toLocaleString()
+    },
+    /** The same reservation, for the heading over the per-frame fields. */
+    frameHeading () {
+      if (!this.state.frameCountKnown) return 'Frame at the playhead'
+      return 'Frame ' + (this.state.frameIndex + 1).toLocaleString()
+    },
     /** The MP4 structure block, or null for a BVR recording. */
     mp4 () { return this.header && this.header.mp4 ? this.header.mp4 : null },
     containerName () { return containerLabel(this.header) },

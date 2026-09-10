@@ -15,6 +15,11 @@ thumbnails.
 
 Also includes a folder browser with thumbnails.
 
+It can also play a recording straight off Blue Iris's web server over the
+network, reading only the parts it needs — an hour-long clip starts in well under
+a second without downloading it. This needs Blue Iris reachable over **https**
+(or a localhost connection), because BVR-Player's features require a secure origin.
+
 ### Requirements
 
 A Chromium-based browser (Chrome, Edge, Opera) for WebCodecs. H.265/HEVC clips

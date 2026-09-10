@@ -42,6 +42,19 @@ const REORDER_STEP = 4
  */
 const STALL_GRACE_MS = 150
 
+/**
+ * Consecutive decode refusals the pipeline will try to recover from.
+ *
+ * A `VideoDecoder` that is handed a delta frame it has no reference for throws
+ * rather than producing rubbish, and the honest response is to start again at
+ * the key frame that frame depends on -- the reference was lost, not the
+ * ability to decode. Bounded so a stream that genuinely cannot be decoded still
+ * reaches the viewer as a message instead of spinning; the count is forgiven by
+ * a picture arriving from past the frame that failed, so a long session is never
+ * rationed for trouble it got over an hour ago.
+ */
+const MAX_RECOVERIES = 4
+
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
 /** A per-source reorder table, sanitised, with a slot for every source stream. */
@@ -85,6 +98,12 @@ export class VideoPipeline {
     // and has been given a key frame. Cleared together on every restart.
     this.decoders = new Map()
     this._ready = new Set()
+    // Streams whose decoder is configured but has been flushed since, and so
+    // must be given a key frame before it will accept anything else. WebCodecs
+    // requires one after `configure()` *and* after `flush()`, and forgetting the
+    // second is what put "a key frame is required after configure() or flush()"
+    // across the picture part way through a remote recording.
+    this._needKey = new Set()
     // The stream the feed is currently inside, so a changeover can be noticed.
     this._feedSource = -1
     this.configured = false
@@ -120,6 +139,13 @@ export class VideoPipeline {
     this._fedHigh = -1
     this._stallMark = ''
     this._stallSince = 0
+    // Decode refusals recovered from without a picture coming back since, and
+    // the frame the last of them was about. The budget is only forgiven by an
+    // output that reaches that frame -- forgiving it on any output at all would
+    // let a frame that always fails restart the run, decode its key frame,
+    // refuse again and go round for as long as the page is open.
+    this._recoveries = 0
+    this._recoverFrom = -1
   }
 
   /**
@@ -173,10 +199,23 @@ export class VideoPipeline {
     return (by && by[this.sourceOf(idx)]) || info
   }
 
-  /** The decoder for one source stream, created on first use. */
+  /**
+   * The decoder for one source stream, created on first use.
+   *
+   * A fatal decoder error closes the codec, and the replacement built here
+   * starts out unconfigured -- so the stream's place in `_ready`, which is the
+   * record of "this source's decoder is configured and has had its key frame",
+   * dies with it. Dropping it is what makes the feed configure the new decoder
+   * and wait for a key frame before handing it anything, rather than feeding an
+   * unconfigured codec a delta frame. Without it the first error is followed by
+   * a second, misleading one -- "Cannot call 'decode' on an unconfigured codec"
+   * -- which, arriving last, is the one the viewer is shown in place of the
+   * failure that actually happened.
+   */
   _decoderFor (si) {
     let dec = this.decoders.get(si)
     if (dec && dec.state !== 'closed') return dec
+    this._ready.delete(si)
     dec = new VideoDecoder({
       output: (frame) => this._onOutput(frame),
       error: (e) => { this.onError(e) }
@@ -395,6 +434,8 @@ export class VideoPipeline {
     this._outIdx = -1
     this._fedHigh = -1
     this._stallMark = ''
+    this._recoveries = 0
+    this._recoverFrom = -1
     this.epoch++
     this.feedStep = 0
     this.runStart = -1
@@ -441,6 +482,7 @@ export class VideoPipeline {
     }
     this.decoders.clear()
     this._ready.clear()
+    this._needKey.clear()
     this.configured = false
   }
 
@@ -493,6 +535,30 @@ export class VideoPipeline {
     this.pump()
   }
 
+  /**
+   * Takes a new frame table for the sequence already being played.
+   *
+   * A streaming index publishes a longer table as it reads further into the
+   * recording, and the pipeline has to see the new frames without losing the
+   * ones it is part way through decoding. Growth is safe to absorb outright,
+   * because appending never moves a frame -- index 40 is the same picture in the
+   * new table as in the old, so the anchor, the feed position and every decoded
+   * frame still mean what they meant. Re-anchoring is not: the table then
+   * describes a different stretch of the file entirely, and everything counted
+   * against the old one has to go.
+   */
+  adopt (pstream, reset) {
+    if (this.closed) return
+    this.pstream = pstream
+    this._sizeWindow()
+    if (reset) {
+      this._restartAt(0)
+      this.anchorIdx = 0
+      this._outIdx = -1
+    }
+    this.pump()
+  }
+
   /** Nearest decodable index at or before idx (skips a leading non-key run). */
   decodableIndex (idx) {
     const s = this.pstream
@@ -542,6 +608,7 @@ export class VideoPipeline {
       try { dec.reset() } catch { /* nothing was queued */ }
     }
     this._ready.clear()
+    this._needKey.clear()
     this._feedSource = -1
     this.configured = true
     this.feedStep = this._stepOf(k)
@@ -571,6 +638,15 @@ export class VideoPipeline {
       const step = this.feedStep
       const idx = this._seqAt(step)
       const si = this.sourceOf(idx)
+
+      // A decoder killed by a fatal error is retired here rather than where its
+      // replacement is built, because the key-frame guard below reads `_ready`
+      // and has to see the truth before it decides. Retire it late and the guard
+      // still believes the stream is running, so the replacement is handed the
+      // delta frame the run happened to be on -- a frame it has no reference for
+      // -- instead of waiting for the key frame that lets it start cleanly.
+      const held = this.decoders.get(si)
+      if (held && held.state === 'closed') this._ready.delete(si)
 
       // The feed has crossed into the other stream, so the one being left has to
       // be drained. A decoder holds pictures back until enough input has
@@ -606,8 +682,12 @@ export class VideoPipeline {
       // A stream is entered only on a key frame. After a restart in the middle
       // of one run, the frames of the *other* stream that follow belong to a run
       // that has not begun yet, and feeding a decoder a delta frame it has no
-      // reference for produces either an error or a corrupt picture.
-      if (info && info.kind === 'video' && !this._ready.has(si) && !isKey) {
+      // reference for produces either an error or a corrupt picture. A decoder
+      // that has been drained is in the same position for the same reason: a
+      // flush empties the decoded picture buffer and the reference along with
+      // it, so what it will accept next is a key frame and nothing else.
+      const needsEntry = !this._ready.has(si) || this._needKey.has(si)
+      if (info && info.kind === 'video' && needsEntry && !isKey) {
         this.feedStep = step + 1
         continue
       }
@@ -640,7 +720,19 @@ export class VideoPipeline {
             timestamp: epoch * TS_SCALE + idx,
             data: bytes
           }))
+          if (isKey) this._needKey.delete(si)
         } catch (e) {
+          // A refused *delta* frame means the reference it needed is gone, not
+          // that the stream cannot be decoded: the only cure is to start again
+          // at the key frame it depends on, which is what a seek would have
+          // done. A refused key frame is a real failure and is reported.
+          const k = isKey ? -1 : this._entryFor(idx)
+          if (k >= 0 && k < idx && this._recoveries < MAX_RECOVERIES) {
+            this._recoveries++
+            this._recoverFrom = idx
+            this._restartAt(k)
+            continue
+          }
           this.onError(e)
           break
         }
@@ -657,29 +749,57 @@ export class VideoPipeline {
   /**
    * Asks one stream's decoder to emit everything it is holding.
    *
-   * `flush` empties the decoded picture buffer without discarding the decoder's
-   * state, so feeding the same stream again afterwards -- which a seek back
-   * across the switch will do -- carries on as if nothing had happened.
+   * `flush` keeps the decoder configured, so feeding the same stream again
+   * afterwards costs no reconfiguration -- but it does empty the decoded picture
+   * buffer, and WebCodecs is explicit that what may follow it is a key frame and
+   * nothing else. The stream is therefore marked as needing an entry point, the
+   * same state it is in before it has ever been fed.
    */
   _drain (si) {
     if (si < 0 || !this._ready.has(si)) return
     const dec = this.decoders.get(si)
     if (!dec || dec.state !== 'configured') return
+    this._needKey.add(si)
     dec.flush().catch(() => { /* superseded by a seek */ })
+  }
+
+  /** The key frame `idx` decodes from, or -1 when the sequence offers none. */
+  _entryFor (idx) {
+    const s = this.pstream
+    if (!s) return -1
+    const k = s.keyIdx[idx]
+    if (k >= 0) return k
+    return s.keys && s.keys.length ? s.keys[0] : -1
   }
 
   /**
    * Drains every decoder once the last chunk of the stream has been fed --
    * without this the final pictures stay inside the decoder and playback stops a
    * few frames short of the end.
+   *
+   * "The end" is the end of the *recording*, not the end of the table. A
+   * streaming window ends wherever reading stopped, and flushing there emptied
+   * the decoder a few seconds into every remote clip -- so the next frames the
+   * window produced were deltas handed to a decoder that had just been told to
+   * forget its reference, and playback died on "a key frame is required after
+   * configure() or flush()". The last frames of a growing window are not the
+   * last frames of anything; they arrive when the window reads further.
    */
   _maybeFlush () {
     if (this.kind !== 'video' || !this.configured || this.closed) return
     if (!this.pstream || this.feedStep < this.pstream.count) return
+    if (!this._sequenceEnded()) return
     if (this._flushEpoch === this.epoch) return
     if (!this._ready.size) return
     this._flushEpoch = this.epoch
     for (const si of this._ready) this._drain(si)
+  }
+
+  /** Whether the frame table this pipeline holds is all there will ever be. */
+  _sequenceEnded () {
+    const ix = this.pstream && this.pstream._index
+    if (!ix || !ix.streaming) return true
+    return !!ix.atEof
   }
 
   _decodeImage (bytes, idx, epoch, info) {
@@ -700,8 +820,13 @@ export class VideoPipeline {
     const idx = frame.timestamp - epoch * TS_SCALE
     // Recorded before the window has its say: a lead-in picture is thrown away
     // but it is still proof the decoder is producing, which is what
-    // `_widenForReorder` needs to know.
+    // `_widenForReorder` needs to know -- and proof that whatever the recovery
+    // budget was last spent on is behind us.
     if (idx > this._outIdx) this._outIdx = idx
+    if (this._recoveries && idx >= this._recoverFrom) {
+      this._recoveries = 0
+      this._recoverFrom = -1
+    }
     if (idx < this.anchorIdx - this.maxBehind || idx > this._keepTo()) {
       frame.close()
       return

@@ -284,14 +284,22 @@
     <h3 class="spanel__h">Storage</h3>
 
     <p class="spanel__note">
-      Thumbnails, folder listings and these settings are kept in this browser&rsquo;s own
-      storage. Nothing is ever sent anywhere.
+      Thumbnails, folder listings, these settings and downloaded pieces of any recording
+      played over the network are kept in this browser&rsquo;s own storage. Nothing is ever
+      sent anywhere.
     </p>
 
     <div class="spanel__row spanel__row--stack">
       <span class="spanel__label">
         {{ storageSummary }}
         <em class="spanel__sub">{{ storageDetail }}</em>
+      </span>
+    </div>
+
+    <div v-if="remoteCache > 0" class="spanel__row spanel__row--stack">
+      <span class="spanel__label">
+        {{ remoteCacheSummary }}
+        <em class="spanel__sub">{{ remoteCacheDetail }}</em>
       </span>
     </div>
 
@@ -319,7 +327,7 @@
         <button type="button" class="btn btn--tiny" :disabled="busy" @click="confirming = 'all'" @keydown.stop>
           Clear all site data and close
         </button>
-        <span class="spanel__sub">Settings, listings, thumbnails and folder permissions</span>
+        <span class="spanel__sub">Settings, listings, thumbnails, cached video and folder permissions</span>
       </template>
     </div>
 
@@ -352,6 +360,7 @@ import { SNAPSHOT_FORMATS, canEncodeWebp, canEncodeLosslessWebp, formatHasQualit
 import { canPickDirectory } from '../library/directory.js'
 import { clearThumbs, countThumbs } from '../library/thumbCache.js'
 import { clearSiteData, closePage, storageUsage } from '../util/storage.js'
+import { cacheBudget, cacheSize } from '../remote/opfsPages.js'
 import { formatBytes } from '../util/format.js'
 
 /**
@@ -382,7 +391,9 @@ export default {
       busy: false,
       storageNote: '',
       storage: null,
-      thumbCount: 0
+      thumbCount: 0,
+      remoteCache: 0,
+      cacheLimit: 0
     }
   },
   mounted () {
@@ -526,6 +537,22 @@ export default {
     thumbCountLabel () {
       const n = this.thumbCount
       return `${n.toLocaleString()} thumbnail${n === 1 ? '' : 's'}`
+    },
+    /**
+     * What the remote byte cache is holding.
+     *
+     * Its own line rather than a clause in the one above, because it is the one
+     * figure here a viewer can watch grow by gigabytes in an afternoon -- and no
+     * line at all until there is something to say, since someone who has never
+     * opened a recording over the network has no cache to think about.
+     */
+    remoteCacheSummary () {
+      return `${formatBytes(this.remoteCache)} of video cached`
+    },
+    remoteCacheDetail () {
+      const bits = ['Downloaded pieces of recordings played over the network']
+      if (this.cacheLimit) bits.push(`oldest dropped past ${formatBytes(this.cacheLimit)}`)
+      return bits.join(' · ')
     }
   },
   methods: {
@@ -582,9 +609,13 @@ export default {
 
     // ---------------------------------------------------------------- storage
     async readStorage () {
-      const [storage, thumbCount] = await Promise.all([storageUsage(), countThumbs()])
+      const [storage, thumbCount, remoteCache, cacheLimit] = await Promise.all([
+        storageUsage(), countThumbs(), cacheSize(), cacheBudget()
+      ])
       this.storage = storage
       this.thumbCount = thumbCount
+      this.remoteCache = remoteCache
+      this.cacheLimit = cacheLimit
     },
     async deleteThumbs () {
       this.confirming = ''

@@ -96,7 +96,13 @@ export function readSessionUrl (hash) {
   const seen = new Set()
   const left = readIds(p.get('left'), seen)
   const right = readIds(p.get('right'), seen)
+  // A recording on a server, which UI3 links to directly. Only the identifying
+  // half of the URL is ever written here; the session token that came with it
+  // lives in `sessionStorage` instead -- see `src/remote/blueIris.js`, which is
+  // also where a URL arriving with one still attached is split.
+  const remote = p.get('u') || ''
   return {
+    remote: remote ? { url: remote, name } : null,
     file: name && dir ? { name, dir } : null,
     time: parseTime(p.get('t')),
     playing: p.get('play') === '1',
@@ -118,10 +124,15 @@ export function readSessionUrl (hash) {
  * seconds otherwise -- a position that moves thirty times a second is not worth
  * thirty URL rewrites, but the panel that just opened is worth one immediately.
  */
-export function sessionHash ({ file, time = 0, playing = false, panels }) {
+export function sessionHash ({ file, remote = null, time = 0, playing = false, panels }) {
   const before = []
   const after = []
-  if (file && file.name && file.dir) {
+  const located = !!(remote && remote.url) || !!(file && file.name && file.dir)
+  if (remote && remote.url) {
+    before.push(`u=${enc(remote.url)}`)
+    if (remote.name) before.push(`f=${enc(remote.name)}`)
+    if (playing) after.push('play=1')
+  } else if (file && file.name && file.dir) {
     before.push(`f=${enc(file.name)}`, `d=${enc(file.dir)}`)
     if (playing) after.push('play=1')
   }
@@ -136,7 +147,7 @@ export function sessionHash ({ file, time = 0, playing = false, panels }) {
   // The playhead sits between the file it belongs to and everything else, so
   // that a URL reads in the order someone would say it out loud.
   const stable = [...before, ...after].join('&')
-  const t = file && file.name && file.dir && time > 0 ? [`t=${formatTime(time)}`] : []
+  const t = located && time > 0 ? [`t=${formatTime(time)}`] : []
   return { hash: [...before, ...t, ...after].join('&'), stable }
 }
 
