@@ -549,6 +549,16 @@ rather than exceptional.
   folder's real price is about twice what the grid shows. Entries scanned is
   therefore what `saveListing` records alongside the names.
 
+  None of that applies within one page. The browser is unmounted every time a
+  clip is opened out of it, and coming back used to go through all of the above
+  again — for a small folder, a fresh walk plus a `getFile()` per clip for its
+  size, which on a network share is seconds of waiting for nothing new. So the
+  finished listing is kept in memory when the browser closes (`lastListing` in
+  `FolderBrowser.vue`) and put straight back on reopen, sizes and scroll position
+  included, which also means thumbnails come out of IndexedDB without a single
+  file being touched. Refresh still reads the disk; a scan closed half-way is
+  not kept.
+
   A scan that falls under 400 entries a second for twelve seconds is still noted
   against the folder, but as a warning rather than a refusal, and it expires
   after a day. A slow reading almost always means the disk was busy at that

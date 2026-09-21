@@ -338,6 +338,22 @@ const SLOW_RATE = 400
 // no more.
 const SCAN_MARK_MS = 5000
 
+/**
+ * The listing the browser was last closed on, kept for as long as the page is.
+ *
+ * The browser is unmounted whenever it closes -- every time a clip is opened out
+ * of it -- and without this, coming back meant walking the folder again and, for
+ * a small one, asking every file for its size again too: a round trip each,
+ * which on a network share is the whole of the wait. Nothing about the folder
+ * has been learned in between that the listing on screen did not already know,
+ * so it is simply put back, sizes, scroll position and all. Refresh is still the
+ * way to look at the disk again.
+ *
+ * Module scope rather than component state, because the component is the thing
+ * that does not survive. Only a listing that finished is kept.
+ */
+let lastListing = null
+
 export default {
   name: 'FolderBrowser',
   components: { AppIcon },
@@ -489,6 +505,7 @@ export default {
   beforeUnmount () {
     clearTimeout(this.filterTimer)
     if (this.resizeObserver) this.resizeObserver.disconnect()
+    this.keepListing()
     this.cancelScan()
     this.service.dispose()
   },
@@ -532,6 +549,7 @@ export default {
 
     // ------------------------------------------------------------ directories
     async restore () {
+      if (await this.restoreKept()) return
       if (!canPickDirectory()) return
       const handle = await loadDirectoryHandle()
       if (!handle) return
@@ -556,6 +574,50 @@ export default {
         // prompt nobody asked for.
         this.needsPermission = handle
       }
+    },
+    /** Remembers the listing on screen for the next time the browser opens. */
+    keepListing () {
+      // A walk still under way is abandoned by closing, and what it had found
+      // so far is not the folder.
+      if (this.scanning || !this.all.length) {
+        lastListing = null
+        return
+      }
+      lastListing = {
+        handle: this.dirHandle,
+        dirName: this.dirName,
+        entries: this.all,
+        listedAt: this.listedAt,
+        scrollTop: this.$refs.scroll ? this.$refs.scroll.scrollTop : 0
+      }
+    },
+    /**
+     * Puts back the listing the browser was closed on, if there is one it can
+     * still read. Answers whether it did.
+     */
+    async restoreKept () {
+      const kept = lastListing
+      if (!kept) return false
+      // A handle this page was using is normally still granted, but the grant is
+      // the browser's to withdraw; asking is local and costs nothing. A
+      // `webkitdirectory` listing has no handle and holds its Files itself.
+      if (kept.handle && await directoryPermission(kept.handle, false) !== 'granted') {
+        lastListing = null
+        return false
+      }
+      this.dirHandle = kept.handle
+      this.dirName = kept.dirName
+      this.listedAt = kept.listedAt
+      await this.setEntries(kept.entries)
+      // After the first layout and its calibration, which is what makes the
+      // offsets the saved position was measured against true again.
+      await this.$nextTick()
+      const el = this.$refs.scroll
+      if (el && kept.scrollTop) {
+        el.scrollTop = kept.scrollTop
+        this.updateWindow()
+      }
+      return true
     },
     async regrant () {
       const handle = this.needsPermission
@@ -789,7 +851,7 @@ export default {
       this.hydratedAll = entries.every(isHydrated)
       this.wanted.clear()
       this.error = ''
-      this.applySort()
+      return this.applySort()
     },
 
     // -------------------------------------------------------------- the listing
