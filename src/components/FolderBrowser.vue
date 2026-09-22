@@ -270,7 +270,7 @@
 import AppIcon from './AppIcon.vue'
 import { formatBytes, formatTime, formatUtc } from '../util/format.js'
 import { displayCamera, isTimeSort, needsFileSize, sortClips, SORTS } from '../library/bvrName.js'
-import { buildRows, columnsFor, measureRows, rowAt } from '../library/clipRows.js'
+import { buildRows, columnsFor, measureRows, rowAt, rowOfClip } from '../library/clipRows.js'
 import {
   canBrowseDirectories, canPickDirectory, directoryPermission, entriesFromFileList,
   entriesFromNames, hydrate, hydrateAll, isHydrated, listDirectory, releaseEntry
@@ -458,7 +458,12 @@ export default {
     view () { this.relayout() },
     query () {
       clearTimeout(this.filterTimer)
-      this.filterTimer = setTimeout(() => this.applyFilter(), FILTER_DELAY)
+      this.filterTimer = setTimeout(() => {
+        // Already applied when the text was put back rather than typed -- see
+        // `restoreKept` -- and applying it again would throw away the scroll
+        // position that was restored with it.
+        if (this.query.trim().toLowerCase() !== this.filteredBy) this.applyFilter()
+      }, FILTER_DELAY)
     }
   },
   created () {
@@ -483,6 +488,8 @@ export default {
     this.metrics = { head: 46, item: 220 }
     this.metricSig = ''
     this.wanted = new Map() // name -> clip, for everything currently on screen
+    this.pendingAnchor = null // a scroll position waiting on real row heights
+    this.filteredBy = ''      // the filter text `clips` was last cut with
     this.statActive = 0
     this.hydratedAll = false
     // Two scans, two scopes. Reading the folder and reading every file's size
@@ -588,8 +595,40 @@ export default {
         dirName: this.dirName,
         entries: this.all,
         listedAt: this.listedAt,
-        scrollTop: this.$refs.scroll ? this.$refs.scroll.scrollTop : 0
+        query: this.query,
+        anchor: this.scrollAnchor()
       }
+    },
+    /**
+     * Where the list is scrolled to, as the row at the top and how far into it.
+     *
+     * Not as pixels: the rows a reopened browser builds start from estimated
+     * heights and are only corrected once laid out, and a window resized in the
+     * meantime has a different number of columns -- either of which makes a
+     * saved `scrollTop` land somewhere else entirely. The clip a row starts with
+     * is the same clip however the rows around it are measured.
+     */
+    scrollAnchor () {
+      const el = this.$refs.scroll
+      if (!el || !this.offsets || !this.rows.length || !el.scrollTop) return null
+      const r = rowAt(this.offsets, el.scrollTop)
+      const row = this.rows[r]
+      return { clip: row.start, head: !!row.head, delta: el.scrollTop - this.offsets[r] }
+    },
+    /**
+     * Scrolls back to a saved anchor, once the row heights are the real ones --
+     * `calibrate` calls this when it has finished correcting them.
+     */
+    settleScroll () {
+      const anchor = this.pendingAnchor
+      this.pendingAnchor = null
+      const el = this.$refs.scroll
+      if (!anchor || !el || !this.offsets || !this.rows.length) return
+      const r = rowOfClip(this.rows, anchor.clip, anchor.head)
+      if (r < 0) return
+      const height = this.offsets[r + 1] - this.offsets[r]
+      el.scrollTop = this.offsets[r] + Math.min(anchor.delta, height)
+      this.updateWindow()
     },
     /**
      * Puts back the listing the browser was closed on, if there is one it can
@@ -608,15 +647,10 @@ export default {
       this.dirHandle = kept.handle
       this.dirName = kept.dirName
       this.listedAt = kept.listedAt
+      // Before the listing, so the filter it is laid out with is this one.
+      this.query = kept.query || ''
+      this.pendingAnchor = kept.anchor
       await this.setEntries(kept.entries)
-      // After the first layout and its calibration, which is what makes the
-      // offsets the saved position was measured against true again.
-      await this.$nextTick()
-      const el = this.$refs.scroll
-      if (el && kept.scrollTop) {
-        el.scrollTop = kept.scrollTop
-        this.updateWindow()
-      }
       return true
     },
     async regrant () {
@@ -896,6 +930,7 @@ export default {
     },
     applyFilter (resetScroll = true) {
       const q = this.query.trim().toLowerCase()
+      this.filteredBy = q
       // `search` is the name pre-lowered at listing time, and the camera is a
       // slice of the name, so one `includes` covers both.
       this.clips = q ? this.all.filter((e) => e.search.includes(q)) : this.all
@@ -973,12 +1008,14 @@ export default {
         this.metrics.head = head.offsetHeight
         changed = true
       }
-      if (!changed) return
-      const anchor = Math.max(0, this.range.first)
+      if (!changed) { this.settleScroll(); return }
+      // Whatever is at the top of the viewport stays there -- unless a reopened
+      // browser is waiting to put something else there, in which case that is
+      // what these corrected heights are for.
+      if (!this.pendingAnchor) this.pendingAnchor = this.scrollAnchor()
       this.applyMetrics()
       this.$nextTick(() => {
-        if (anchor > 0 && this.offsets) el.scrollTop = this.offsets[anchor]
-        this.updateWindow()
+        this.settleScroll()
         // A corrected height can bring a differently-sized row into view; two
         // more passes settle it, and it converges long before that in practice.
         if (attempt < 2) this.$nextTick(() => this.calibrate(attempt + 1))

@@ -90,6 +90,26 @@ export function rowAt (offsets, y) {
 }
 
 /**
+ * The row holding the clip at `index`, or the heading above it when `head` asks
+ * for that and it opens the same run. The inverse of reading `start` off a row,
+ * for finding a place again after the rows have been rebuilt.
+ */
+export function rowOfClip (rows, index, head = false) {
+  let lo = 0
+  let hi = rows.length - 1
+  if (hi < 0) return -1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (rows[mid].start <= index) lo = mid
+    else hi = mid - 1
+  }
+  // A heading and the first line under it share a start, and the search lands
+  // on the later of the two.
+  if (head && lo > 0 && rows[lo - 1].head && rows[lo - 1].start === rows[lo].start) lo--
+  return lo
+}
+
+/**
  * How many clips fit across, from the width there is to put them in.
  *
  * Mirrors what `auto-fill` with a `minmax` track would have worked out, because

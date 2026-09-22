@@ -554,8 +554,11 @@ rather than exceptional.
   again — for a small folder, a fresh walk plus a `getFile()` per clip for its
   size, which on a network share is seconds of waiting for nothing new. So the
   finished listing is kept in memory when the browser closes (`lastListing` in
-  `FolderBrowser.vue`) and put straight back on reopen, sizes and scroll position
-  included, which also means thumbnails come out of IndexedDB without a single
+  `FolderBrowser.vue`) and put straight back on reopen, sizes, filter text and
+  scroll position included. The scroll position is saved as the clip at the top
+  of the viewport rather than as pixels, and applied only once `calibrate` has
+  replaced the estimated row heights with measured ones, so it lands on the same
+  clip even if the window was resized in between. That also means thumbnails come out of IndexedDB without a single
   file being touched. Refresh still reads the disk; a scan closed half-way is
   not kept.
 
