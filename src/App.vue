@@ -304,7 +304,7 @@
       :view="settings.libraryView"
       :sort="settings.librarySort"
       :current-name="state.fileName"
-      @close="libraryOpen = false"
+      @close="closeLibrary"
       @open="onLibraryOpen"
       @patch="patchSettings"
       @notice="showNotice"
@@ -358,6 +358,7 @@ import { analyzeRecording } from './container/analyze.js'
 import { downloadBlob } from './util/download.js'
 import { loadSettings, saveSettings } from './util/settings.js'
 import { readSessionUrl, sessionHash, writeSessionHash } from './util/sessionUrl.js'
+import { navPush, navReplace, navReturn, navState } from './util/navHistory.js'
 import { HttpFile } from './remote/httpFile.js'
 import { splitRemoteUrl, rememberCredentials, requestUrl, remoteName } from './remote/blueIris.js'
 import { formatBytes } from './util/format.js'
@@ -699,6 +700,13 @@ export default {
     // `{ time, playing, panels }` for the file currently being opened, consumed
     // once its index is built. See onFileReady.
     this.resumeState = null
+    // What each history entry showing a recording showed, by entry key, so that
+    // Back or Forward onto one can open it again: `{ reopen, time }`. See
+    // `onPopState`. Only for as long as the page lives -- a File cannot be put
+    // anywhere that survives it.
+    this.navRecords = new Map()
+    // The key of the entry the open recording belongs to.
+    this.openKey = null
   },
   mounted () {
     this.player = new BvrPlayer({
@@ -745,12 +753,17 @@ export default {
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('beforeunload', this.closeAllPopouts)
     window.addEventListener('hashchange', this.onHashChange)
+    window.addEventListener('popstate', this.onPopState)
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
     window.addEventListener('beforeinstallprompt', this.onInstallPrompt)
     // The dock stacks exist from here on, so a Teleport may safely look for one.
     this.mounted = true
     this.consumeLaunchFiles()
     this.restoreSnapshotFolder()
+    // The entry the page loaded on is the start screen until something says
+    // otherwise. After a reload it keeps its key and the page beneath it, so the
+    // entries left behind by the last load still lead somewhere.
+    navReplace('home')
     this.restoreFromUrl()
   },
   beforeUnmount () {
@@ -758,6 +771,7 @@ export default {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('beforeunload', this.closeAllPopouts)
     window.removeEventListener('hashchange', this.onHashChange)
+    window.removeEventListener('popstate', this.onPopState)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
     window.removeEventListener('beforeinstallprompt', this.onInstallPrompt)
     if (this.ro) this.ro.disconnect()
@@ -785,9 +799,11 @@ export default {
      * picked out of a folder the browser will still have a handle for after a
      * reload, and null for anything dropped, chosen from the file picker or
      * handed over by the OS, none of which survives the page. `resume` is the
-     * state a reload is putting back; see onFileReady.
+     * state a reload is putting back; see onFileReady. `nav` is what this does to
+     * the back button: `'push'` is a new page to go back from, and `'replace'`
+     * is the page already being stood on -- a reload, or Back arriving at it.
      */
-    async openFile (file, origin = 'dropzone', { ref = null, resume = null } = {}) {
+    async openFile (file, origin = 'dropzone', { ref = null, resume = null, nav = 'push' } = {}) {
       this.notice = ''
       this.uiVisible = true
       // The panels stay open across files now that they sit beside the video
@@ -808,6 +824,9 @@ export default {
       // was, which on a large one is several seconds of indexing.
       if (!resume) this.cancelResume()
       else this.syncUrl()
+      this.notePlayerPage(nav, (time) => this.openFile(file, origin, {
+        ref, nav: 'replace', resume: { time, playing: false, panels: [], collapsed: [] }
+      }))
       await this.player.open(file)
       this.player.setVolume(this.settings.volume)
       if (this.settings.muted !== this.player.muted) this.player.toggleMute()
@@ -824,7 +843,7 @@ export default {
      * from wherever playback is about to start, and being told after the fact
      * would mean reading the first half of an hour to reach the middle of it.
      */
-    async openRemote (url, name = '', resume = null) {
+    async openRemote (url, name = '', resume = null, nav = 'push') {
       const split = splitRemoteUrl(url)
       if (!split) {
         this.showNotice(`${url} is not an address this player can open.`)
@@ -841,6 +860,9 @@ export default {
       this.remoteRef = { url: split.url, name: remoteName(split.url, name) }
       this.resumeState = resume
       this.resumeTarget = null
+      const key = this.notePlayerPage(nav, (time) => this.openRemote(url, name, {
+        time, playing: false, panels: [], collapsed: []
+      }, 'replace'))
 
       try {
         const file = await HttpFile.open(requestUrl(split.url), { name: this.remoteRef.name })
@@ -856,6 +878,12 @@ export default {
         const label = this.remoteRef ? this.remoteRef.name : 'That recording'
         this.remoteRef = null
         this.resumeState = null
+        // Nothing opened, so this entry is not a recording to come back to.
+        if (key) {
+          this.navRecords.delete(key)
+          this.openKey = null
+          navReplace(this.libraryOpen ? 'library' : 'home')
+        }
         this.showNotice(`${label} could not be opened: ${(e && e.message) || e}`)
       }
     },
@@ -889,7 +917,7 @@ export default {
         // recording being opened again rather than a session being restored.
         await this.openRemote(ref.url, ref.name, {
           time: at, playing: false, panels: [], collapsed: []
-        })
+        }, 'replace')
         // A reload refused before the player was handed anything clears the
         // reference on its way out, and with it the button that would let the
         // viewer try once more. The server was busy, not gone; put it back.
@@ -900,13 +928,82 @@ export default {
     },
     goBack () {
       const toLibrary = this.backToLibrary
+      this.closeFile()
+      this.notice = ''
+      if (toLibrary) this.openLibrary({ push: false })
+      navReturn(toLibrary ? 'library' : 'home')
+    },
+    /**
+     * Puts the recording away, remembering where it was left so that coming
+     * back to it through the back button lands in the same place.
+     */
+    closeFile () {
+      const rec = this.openKey && this.navRecords.get(this.openKey)
+      if (rec) rec.time = this.state.currentTime || 0
+      this.openKey = null
       this.player.close()
       this.lastFile = null
       this.fileRef = null
       this.remoteRef = null
       this.fileOrigin = ''
-      this.notice = ''
-      if (toLibrary) this.openLibrary()
+    },
+    /**
+     * Gives the recording being opened a history entry, and says how to open it
+     * again should Back or Forward return to that entry.
+     */
+    notePlayerPage (nav, reopen) {
+      if (nav === 'none') return null
+      const key = nav === 'push' ? navPush('player') : navReplace('player')
+      if (!key) return null
+      this.openKey = key
+      this.navRecords.set(key, { reopen, time: 0 })
+      return key
+    },
+    /**
+     * Back or Forward, onto an entry this app wrote: show the page it names.
+     *
+     * Also what follows every `history.back()` the app makes itself (see
+     * `navReturn`), which arrives to find that page already showing -- so each
+     * branch does nothing when there is nothing to do.
+     */
+    onPopState () {
+      const s = navState()
+      // An entry nobody tagged was made by editing the fragment by hand, and
+      // `hashchange` -- which fires right after this -- is what handles those.
+      if (!s) return
+      // Each entry keeps the fragment it had when it was left, so arriving on
+      // one is also a fragment change. The page named here is the whole of what
+      // the move means; the fragment is rewritten below to match the screen.
+      this.urlHash = (location.hash || '').replace(/^#/, '')
+      const open = this.hasFile || !!this.lastFile
+      if (s.page === 'home') {
+        this.libraryOpen = false
+        if (open) this.closeFile()
+      } else if (s.page === 'library') {
+        // A folder opened over a recording (L, or Escape from one) is still
+        // over it; one arrived at from the recording's own Back is not.
+        if (open && !(s.overKey && s.overKey === this.openKey)) this.closeFile()
+        if (!this.libraryOpen) this.openLibrary({ push: false })
+      } else if (s.page === 'player') {
+        this.libraryOpen = false
+        if (!(open && this.openKey === s.key)) this.reopenEntry(s)
+      }
+      this.syncUrl()
+    },
+    /** The recording a history entry showed, opened again where it was left. */
+    reopenEntry (s) {
+      if (this.hasFile || this.lastFile) this.closeFile()
+      const rec = this.navRecords.get(s.key)
+      if (rec) {
+        rec.reopen(rec.time)
+        return
+      }
+      // Written by an earlier load of this page, so nothing was kept -- but the
+      // fragment it was left with names the recording, and reopening from that
+      // is what `applyExternalUrl` already does for a reload.
+      const saved = readSessionUrl()
+      if (saved.file || saved.remote) this.applyExternalUrl(saved)
+      else navReplace('home')
     },
     /**
      * Hands the panels the recording and the sequence being played.
@@ -956,12 +1053,29 @@ export default {
         this.showNotice(`Could not open ${clip.name}: ${e.message}`)
       }
     },
-    openLibrary () {
+    /**
+     * `push` is false where the folder is not a new page to go back from: Back
+     * arriving at it, or a recording's own Back button returning to it.
+     */
+    openLibrary ({ push = true } = {}) {
       // The browser covers the whole window, so playback would run on unseen -
       // and unpausable, with Space suppressed below - behind it.
       this.player.pause()
       this.libraryOpen = true
       this.wakeUi()
+      if (push === true) navPush('library', { overKey: this.hasFile ? this.openKey : null })
+    },
+    /** The folder browser's Close and Escape: back to whatever it was opened over. */
+    closeLibrary () {
+      this.libraryOpen = false
+      if (!this.hasFile) return navReturn('home')
+      const s = navState()
+      // Only when the entry beneath is the recording still open; stepping back
+      // onto any other would reopen that one instead.
+      if (s && s.overKey && s.overKey === this.openKey) return navReturn('player')
+      const rec = this.openKey && this.navRecords.get(this.openKey)
+      this.openKey = navReplace('player')
+      if (rec && this.openKey) this.navRecords.set(this.openKey, rec)
     },
     onDragEnter () { this.dragDepth++ },
     onDragOver (event) {
@@ -1563,7 +1677,7 @@ export default {
           playing: saved.playing,
           panels: deferred,
           collapsed: saved.panels.collapsed
-        })
+        }, 'replace')
         return
       }
       if (saved.file) {
@@ -1626,7 +1740,7 @@ export default {
           playing: saved.playing,
           panels: deferred,
           collapsed: saved.panels.collapsed
-        })
+        }, 'replace')
         return
       }
 
@@ -1758,6 +1872,7 @@ export default {
         const file = await openFileNamed(handle, want.file.name)
         this.folderKnown = true
         await this.openFile(file, 'library', {
+          nav: 'replace',
           ref: { dir: handle.name, name: want.file.name },
           resume: {
             time: want.time,
@@ -1995,7 +2110,7 @@ export default {
 
       // The folder browser covers the whole window; only its own Escape applies.
       if (this.libraryOpen) {
-        if (event.key === 'Escape') { this.libraryOpen = false; event.preventDefault() }
+        if (event.key === 'Escape') { this.closeLibrary(); event.preventDefault() }
         return
       }
 

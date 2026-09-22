@@ -834,7 +834,43 @@ Going back needs `BvrPlayer.close()` rather than `closeFile()`. The latter drops
 everything the file owned but leaves the published state describing it, which is
 what an *open* wants, since the next open overwrites it a moment later. Going
 back has nothing coming after it, so the state has to be reset as well or the app
-would keep showing the recording's chrome over an empty canvas.
+would keep showing the recording's chrome over an empty canvas. (`App.closeFile`
+is the app's own wrapper around `BvrPlayer.close()`, not the player's
+`closeFile`.)
+
+### The browser's Back button
+
+The app has three pages: the start screen, the folder browser and a recording.
+None of them is a URL, because the fragment is already the session description
+(below) and is rewritten with `replaceState` every few seconds during playback.
+So `src/util/navHistory.js` tags each history entry through `history.state`
+instead, as `{ page, prev, key }`. `replaceState` carries that tag over, so the
+fragment rewriting leaves it alone.
+
+- **Going forward pushes an entry.** Opening the folder browser pushes one, and
+  so does opening a recording (`openFile` / `openRemote`, `nav: 'push'`). A
+  reload putting a recording back, Back arriving at one, and Reload after a
+  remote failure all use `'replace'` instead, because the entry already exists.
+- **The app's own way back uses `history.back()`.** This covers the recording's
+  **Back** button, plus the folder browser's Close button and Escape. When the entry beneath has
+  the page being returned to (`prev`), `navReturn` steps back onto it rather
+  than leaving an entry for a page no longer showing. Otherwise the next press
+  of the browser's Back would land on the current page and seem to do nothing.
+  If the entry beneath doesn't match, the current entry is relabelled instead.
+- **`popstate` shows the page the entry names** (`App.onPopState`). Moving onto
+  a folder-browser entry closes the recording, unless that entry was opened
+  *over* the same recording (<kbd>L</kbd>, or Escape from a clip; `overKey`).
+  Moving onto a recording entry reopens that recording where it was left. The
+  closure that opened it is kept in `navRecords` under the entry's key, with
+  the position it had when closed. After a reload those closures are gone, and
+  the entry's fragment is used instead, the way a reload uses it.
+- **Fragment changes during these moves are ignored.** Each entry keeps the
+  fragment it had when it was left, so a move also fires `hashchange`.
+  `onPopState` marks that fragment as seen so `onHashChange` doesn't act on it,
+  then rewrites it to match the screen.
+
+On `file://` the `pushState` call is refused, and Back leaves the app as it
+always did.
 
 ### The URL, and coming back to where you were
 

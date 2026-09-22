@@ -51,7 +51,8 @@ additionally need platform HEVC decode support (should work on most modern devic
 The address bar keeps the recording, the playhead and the panel layout, so a
 reload or a bookmark comes back to where you were. Reopening the file needs the
 folder permission the browser may or may not have kept; where it has not, the
-start screen offers a **Resume** button.
+start screen offers a **Resume** button. The browser's Back and Forward buttons
+move between the start screen, the folder browser and the clips you opened.
 
 The controls fade out while the pointer sits still; turn on **Always show the
 controls** in the settings panel to keep them up, or turn off **Play button over
